@@ -7,8 +7,8 @@ import {
   type PluginRpcTestHandlers,
 } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginRpcContract } from "@get-bb/plugin-sdk/app";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Board, BoardSummary, Decision, PlanMark, PlanRound, rpcContract, Ticket } from "../src/contract";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Board, BoardSummary, Decision, PlanMark, PlanRound, Review, rpcContract, Ticket, TicketDetail } from "../src/contract";
 import { boardOptionsSchema } from "../src/options";
 import { useDecisionBadge } from "../app/hooks";
 
@@ -462,5 +462,96 @@ describe("after a plan decision", () => {
     expect(await slot.findByText("Nothing else waits on you.")).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: "Back to the board" }));
     expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ options: { subPath: "1" } });
+  });
+});
+
+describe("review changes", () => {
+  const review: Review = {
+    targetKey: "br-live",
+    gitRef: "bb/abc-101",
+    label: "2 of 6 reported",
+    state: "with-agent",
+    threadId: "thr_lead1",
+    createdAt: 5,
+    sentAt: 6,
+  };
+  const detail = (reviews: Review[]): TicketDetail => ({ ticket, decisions: [], stageEvents: [], reviews, linear: null });
+  const ticketRpc = (reviews: Review[], codeReview = true, start?: () => { targetKey: string }) => {
+    const current = { ...board, integrations: { linear: true, codeReview } };
+    return handlers({
+      ...rpc([decision], [summary], current),
+      "board.ticket": () => ({ detail: detail(reviews) }),
+      "reviews.start": start ?? (() => ({ targetKey: "br-started" })),
+    });
+  };
+  // The host routes link clicks in place; here they are only recorded.
+  const followed: string[] = [];
+  const follow = (event: MouseEvent) => {
+    const link = (event.target as Element).closest("a");
+    if (!link) return;
+    event.preventDefault();
+    followed.push(link.getAttribute("href") ?? "");
+  };
+  beforeEach(() => {
+    followed.length = 0;
+    document.addEventListener("click", follow);
+  });
+  afterEach(() => document.removeEventListener("click", follow));
+
+  it("is hidden without Code Review Workspace", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: ticketRpc([], false) });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Pull requests");
+    expect(slot.queryByRole("button", { name: "Review changes" })).toBeNull();
+  });
+
+  it("starts the folder review and goes to it", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: ticketRpc([]) });
+    cleanup = () => slot.lifecycle.unmount();
+    fireEvent.click(await slot.findByRole("button", { name: "Review changes" }));
+    expect(slot.queryByRole("link", { name: "Open review" })).toBeNull();
+    await waitFor(() => expect(followed).toEqual(["/plugins/code-review-workspace/review/br-started"]));
+    expect(slot.inspection.rpcCalls).toContainEqual({ method: "reviews.start", input: { boardId: 1, key: "ABC-101" } });
+  });
+
+  it("links to the ticket's live review instead of starting one", async () => {
+    const done: Review = { ...review, targetKey: "br-done", state: "approved" };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: ticketRpc([done, review]) });
+    cleanup = () => slot.lifecycle.unmount();
+    const open = await slot.findByRole("link", { name: "Open review" });
+    expect(open.getAttribute("href")).toBe("/plugins/code-review-workspace/review/br-live");
+    expect(slot.queryByRole("button", { name: "Review changes" })).toBeNull();
+    fireEvent.click(open);
+    expect(followed).toEqual(["/plugins/code-review-workspace/review/br-live"]);
+    expect(slot.inspection.rpcCalls.map((call) => call.method)).not.toContain("reviews.start");
+  });
+
+  it("links a live review whatever the folder, and starts none without one", async () => {
+    const noFolder = (reviews: Review[]) =>
+      handlers({
+        ...rpc([decision], [summary], { ...board, integrations: { linear: true, codeReview: true } }),
+        "board.ticket": () => ({ detail: { ...detail(reviews), ticket: { ...ticket, environmentId: null } } }),
+      });
+    let slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: noFolder([review]) });
+    cleanup = () => slot.lifecycle.unmount();
+    expect((await slot.findByRole("link", { name: "Open review" })).getAttribute("href")).toBe(
+      "/plugins/code-review-workspace/review/br-live",
+    );
+    slot.lifecycle.unmount();
+    slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: noFolder([]) });
+    await slot.findByText("Pull requests");
+    expect(slot.queryByRole("button", { name: "Review changes" })).toBeNull();
+    expect(slot.queryByRole("link", { name: "Open review" })).toBeNull();
+  });
+
+  it("shows why a review did not start", async () => {
+    const start = () => {
+      throw new Error("This thread’s folder isn’t on a branch.");
+    };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: ticketRpc([], true, start) });
+    cleanup = () => slot.lifecycle.unmount();
+    fireEvent.click(await slot.findByRole("button", { name: "Review changes" }));
+    expect((await slot.findByRole("alert")).textContent).toContain("isn’t on a branch");
+    expect(followed).toEqual([]);
   });
 });

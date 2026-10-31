@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import {
   Markdown,
   UrlLink,
@@ -11,7 +11,7 @@ import { defineRpcContract } from "../src/rpc";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { rpcContract, type Ticket, type TicketDetail } from "../src/contract";
+import { rpcContract, type Review, type Ticket, type TicketDetail } from "../src/contract";
 import { useOpenAgentThread, useOrchestratorTabOnFirstVisit } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
 import { Overview } from "./Overview";
@@ -208,7 +208,11 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
       </Section>
 
       {integrations?.codeReview && (
-        <Section title="Reviews" count={reviews.length}>
+        <Section
+          title="Reviews"
+          count={reviews.length}
+          trailing={<ReviewChanges boardId={boardId} ticket={ticket} reviews={reviews} />}
+        >
           {reviews.length === 0 ? (
             <Empty>No Code Review Workspace reviews for this ticket.</Empty>
           ) : (
@@ -259,6 +263,48 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
         )}
       </Section>
     </>
+  );
+}
+
+/**
+ * Opens the ticket's live review in Code Review Workspace; with none, starts
+ * its folder's review from the lead thread, then goes to it.
+ */
+function ReviewChanges({ boardId, ticket, reviews }: { boardId: number; ticket: Ticket; reviews: Review[] }) {
+  const start = useRpcMutation({ contract: rpcContract, method: "reviews.start" });
+  // bb routes a click on a link inside the plugin in place; the SDK only navigates to this plugin's own panels.
+  const link = useRef<HTMLAnchorElement>(null);
+  const live = ticket.openReview ?? reviews.find((r) => r.state !== "approved" && r.state !== "archived") ?? null;
+  const go = async () => {
+    const { targetKey } = await start.mutate({ boardId, key: ticket.key });
+    const anchor = link.current;
+    if (!anchor) return;
+    anchor.href = `/plugins/code-review-workspace/review/${encodeURIComponent(targetKey)}`;
+    anchor.click();
+  };
+  // The hidden link stays mounted whichever button shows: the refetch after starting can switch to Open review first.
+  return (
+    <span className="flex items-center gap-2">
+      {live ? (
+        <Button asChild size="sm" variant="outline">
+          <a href={`/plugins/code-review-workspace/review/${encodeURIComponent(live.targetKey)}`}>Open review</a>
+        </Button>
+      ) : (
+        ticket.environmentId && (
+          <>
+            {start.error && (
+              <span role="alert" className="text-xs font-normal text-destructive">
+                {errorText(start.error)}
+              </span>
+            )}
+            <Button size="sm" variant="outline" disabled={start.isPending} onClick={() => void go().catch(() => {})}>
+              {start.isPending ? "Starting review…" : "Review changes"}
+            </Button>
+          </>
+        )
+      )}
+      <a ref={link} hidden aria-hidden="true" />
+    </span>
   );
 }
 

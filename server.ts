@@ -195,6 +195,7 @@ export default async function plugin(bb: BbPluginApi) {
     "decisions.withdraw": ({ id, note }) => conductor.withdraw(id, note || null),
     "decisions.retryDelivery": ({ id }) => conductor.retryDelivery(id),
     "reviews.poll": async () => ({ changed: await conductor.pollReviews() }),
+    "reviews.start": ({ boardId, key }) => conductor.engine(boardId).startReview(key),
     "thread.ticket": ({ threadId }) => conductor.threadView(threadId),
     "orchestrators.list": () => ({ boards: conductor.orchestrators() }),
     "plans.waiting": () => ({ rounds: conductor.plansWaiting() }),

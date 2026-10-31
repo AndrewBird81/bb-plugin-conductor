@@ -303,6 +303,11 @@ export const rpcContract = defineRpcContract({
   "decisions.retryDelivery": { input: decisionIdInput, output: decisionSchema },
   /** Re-reads review rounds; the page calls it every few seconds while visible. */
   "reviews.poll": { input: z.null(), output: z.object({ changed: z.boolean() }) },
+  /** Starts or opens the ticket's folder review in Code Review Workspace, from its lead thread. */
+  "reviews.start": {
+    input: z.object({ boardId: z.number().int().positive(), key: z.string().min(1).max(40) }).strict(),
+    output: z.object({ targetKey: z.string() }),
+  },
   /** Open plan rounds on every board, for the inbox and the badge. */
   "plans.waiting": { input: z.null(), output: z.object({ rounds: z.array(planRoundSchema) }) },
   "plans.list": {

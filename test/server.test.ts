@@ -25,6 +25,10 @@ interface World {
   reviewsFail: boolean;
   /** Files on the agents' machine, by absolute path. */
   files: Record<string, string>;
+  /** Code Review Workspace's reviewThreadChanges, by the thread it runs for; throws when it throws. */
+  startReview: (threadId: string) => unknown;
+  /** Threads reviewThreadChanges was called for. */
+  started: string[];
 }
 
 function thread(id: string, parentThreadId: string, title: string, extra = {}) {
@@ -77,6 +81,8 @@ async function setup(
     reviews: [],
     reviewsFail: false,
     files: {},
+    startReview: () => ({ ok: true, targetKey: "br-started" }),
+    started: [],
     ...options.world,
   };
   const metadata = new Map<string, Record<string, unknown>>();
@@ -199,6 +205,11 @@ async function setup(
                   ...world.reviews,
                 ],
               };
+            }
+            if (args.pluginId === "code-review-workspace" && args.method === "reviewThreadChanges") {
+              const { threadId } = args.input as { threadId: string };
+              world.started.push(threadId);
+              return world.startReview(threadId);
             }
             throw new Error(`unexpected rpc ${args.pluginId}.${args.method}`);
           })();
@@ -792,6 +803,65 @@ describe("review rounds", () => {
     await harness.behavior.runCli(["report", "ABC-10", "--thread", "thr_lead1"]);
     const board = await boardOf(harness);
     expect(board.reviewsWaiting.map((r) => r.ticketKey)).toEqual(["ABC-101"]);
+  });
+
+  const startReview = (harness: Harness, key: string) =>
+    harness.behavior.callRpc("reviews.start", { boardId: 1, key }) as Promise<{ targetKey: string }>;
+
+  it("starts the folder review from the ticket's lead thread and shows it without waiting for a poll", async () => {
+    const { harness, world } = await setup();
+    world.startReview = () => {
+      world.reviews.push(folderReview({ targetKey: "br-started", mainThread: { threadId: "thr_lead2" }, sourceThreadId: "thr_lead2" }));
+      return { ok: true, targetKey: "br-started" };
+    };
+    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")!.openReview).toBeNull();
+    const signals = harness.realtimeSignals.length;
+
+    expect(await startReview(harness, "ABC-102")).toEqual({ targetKey: "br-started" });
+    expect(world.started).toEqual(["thr_lead2"]);
+    expect(harness.realtimeSignals.length).toBeGreaterThan(signals);
+    const board = await boardOf(harness);
+    expect(board.tickets.find((t) => t.key === "ABC-102")!.openReview).toMatchObject({ targetKey: "br-started" });
+    expect(board.reviewsWaiting).toContainEqual(expect.objectContaining({ targetKey: "br-started", ticketKey: "ABC-102" }));
+  });
+
+  it("refuses to start a review without Code Review Workspace 1.8, and does not call it", async () => {
+    for (const options of [{ peers: ["linear"] }, { peerVersions: { "code-review-workspace": "1.7.2" } }]) {
+      const { harness, world } = await setup(options);
+      await expect(startReview(harness, "ABC-101")).rejects.toThrow("Code Review Workspace 1.8 or newer is not running");
+      expect(world.started).toEqual([]);
+    }
+  });
+
+  it("refuses a ticket with no folder or none on the board, and does not call Code Review Workspace", async () => {
+    const { harness, world } = await setup();
+    world.children[ORCH]!.push(thread("thr_lead3", ORCH, "ABC-130 no checkout", { environmentId: null }));
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect((await detailOf(harness, "ABC-130")).ticket.environmentId).toBeNull();
+    await expect(startReview(harness, "ABC-999")).rejects.toThrow("No ticket ABC-999");
+    await expect(startReview(harness, "ABC-130")).rejects.toThrow("has no folder to review");
+    expect(world.started).toEqual([]);
+  });
+
+  it("passes on why Code Review Workspace did not start the review", async () => {
+    const { harness, world } = await setup();
+    world.startReview = () => ({ ok: false, error: "This thread’s folder isn’t on a branch." });
+    await expect(startReview(harness, "ABC-101")).rejects.toThrow("This thread’s folder isn’t on a branch.");
+    world.startReview = () => {
+      throw new Error("code-review-workspace is not running");
+    };
+    await expect(startReview(harness, "ABC-101")).rejects.toThrow(
+      "Couldn't reach Code Review Workspace: code-review-workspace is not running",
+    );
+    expect(world.started).toEqual(["thr_lead1", "thr_lead1"]);
+  });
+
+  it("tolerates odd output from Code Review Workspace's start", async () => {
+    const { harness, world } = await setup();
+    world.startReview = () => ({ ok: true });
+    await expect(startReview(harness, "ABC-101")).rejects.toThrow("Code Review Workspace didn't start the review");
+    world.startReview = () => null;
+    await expect(startReview(harness, "ABC-101")).rejects.toThrow("Couldn't reach Code Review Workspace");
   });
 
   it("shows no review data when Code Review Workspace fails", async () => {

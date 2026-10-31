@@ -316,3 +316,26 @@ export async function codeReviews(bb: BbPluginApi): Promise<LinkedReview[]> {
     return [];
   }
 }
+
+const startedSchema = z.object({ ok: z.boolean(), error: z.string().optional(), targetKey: z.string().optional() });
+
+/**
+ * Starts or opens the review of a thread's folder, as `bb review` with no
+ * arguments does there; returns its key, or throws with Code Review Workspace's reason.
+ */
+export async function startCodeReview(bb: BbPluginApi, threadId: string): Promise<string> {
+  let started: z.infer<typeof startedSchema>;
+  try {
+    started = await bb.sdk.plugins.callRpc({
+      pluginId: "code-review-workspace",
+      method: "reviewThreadChanges",
+      input: { threadId },
+      outputSchema: startedSchema,
+    });
+  } catch (error) {
+    bb.log.warn(`code-review-workspace reviewThreadChanges: ${String(error)}`);
+    throw new Error(`Couldn't reach Code Review Workspace: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (started.ok && started.targetKey) return started.targetKey;
+  throw new Error(started.error || "Code Review Workspace didn't start the review. Try again.");
+}

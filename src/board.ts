@@ -19,7 +19,7 @@ import {
 } from "./contract";
 import { discoverTickets } from "./discovery";
 import { compileRegex, DEFAULT_TICKET_PATTERN, milestoneFor, type BoardOptions } from "./options";
-import { codeReviews, linearIssue, linearResolve, type LinkedReview } from "./peers";
+import { codeReviews, linearIssue, linearResolve, startCodeReview, type LinkedReview } from "./peers";
 import { checkPlanPath, PLAN_MAX_BYTES } from "./plans";
 import { decideStage } from "./stages";
 import type { BoardStore, NewDecision } from "./store";
@@ -401,6 +401,21 @@ export class BoardEngine {
         .map(({ ticketKey: _, ...review }) => review),
       linear,
     };
+  }
+
+  /**
+   * Starts or opens the review of the ticket's folder in Code Review Workspace,
+   * as `bb review` in its lead thread would, then re-reads the reviews.
+   */
+  async startReview(key: string): Promise<{ targetKey: string }> {
+    if (!this.integrations().codeReview) throw new Error("Code Review Workspace 1.8 or newer is not running.");
+    const ticket = this.store.getTicket(key);
+    if (!ticket) throw new Error(`No ticket ${key} on the board.`);
+    if (!ticket.environmentId) throw new Error(`${key}'s lead thread has no folder to review.`);
+    const targetKey = await startCodeReview(this.bb, ticket.leadThreadId);
+    await this.refreshReviews();
+    this.changed();
+    return { targetKey };
   }
 
   threadView(threadId: string): { ticket: Ticket | null; role: Role | null; decisions: Decision[] } {
