@@ -30,7 +30,8 @@ answer goes straight back to the agent that asked.
 - **Rules you choose.** Per board, switch on what agents are told: ask
   decisions on the board, report stages, plan rounds, one PR open for review
   at a time, PRs split by layer, one agent per ticket, Code Review Workspace
-  rounds. Add your own text too.
+  reviews (agents open a review of their folder, report on each comment you
+  send and don't push until told). Add your own text too.
 
 <p>
   <img src="docs/screenshots/stages.png" alt="Tickets in stage sections with PR stacks and agent status" width="320">
@@ -67,18 +68,30 @@ update can break parts of it; each surface fails on its own.
 | Plugin | Adds |
 | --- | --- |
 | [Linear](https://github.com/vburojevic/bb-plugin-linear) | Ticket keys from issue bindings, issue state, description and relations |
-| Code Review Workspace | Review rounds waiting on you; Code review stage |
+| Code Review Workspace 1.8 or newer | Reviews of each ticket's folder and threads with their status; Code review stage; **Review changes** on the ticket page |
 | GitHub PR Status (bundled) | The PR of each ticket's branch |
 
-Without them the board works from thread titles and what agents report.
+Without them the board works from thread titles and what agents report. An
+older Code Review Workspace counts as missing.
+
+A review belongs to a ticket when it is of the ticket's folder or comes from
+one of its threads. Cards and the ticket page show Code Review Workspace's own
+status, such as "Ready to re-review" or "2 of 6 reported". In the Reviews
+section of a ticket's page, **Open review** goes to the ticket's live review;
+with none, **Review changes** starts a review of its folder from the lead
+thread.
 
 ## How stages are decided
 
 The first rule that matches wins:
 
 1. **Paused** when an agent reports it.
-2. **Code review** while a Code Review Workspace round waits on you;
-   **Building** once you sent comments back, until the agent reports again.
+2. **Code review** while a Code Review Workspace review of the ticket's
+   folder or threads waits on you; **Building** while your comments or a Push
+   are with the agent, until the agent reports again. A review that waits on
+   someone else (the PR's author, a draft, a snooze, a paused folder) or is of
+   a removed folder doesn't hold the stage. Approved and archived reviews are
+   finished, and one merged into another is dropped.
 3. **In review** when a PR is open for review; **In milestone** when all PRs
    are merged.
 4. The stage the agent **reported**, if any.
