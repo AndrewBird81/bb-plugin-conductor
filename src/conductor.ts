@@ -21,6 +21,20 @@ import type { NewDecision, Store, TableName } from "./store";
 /** Plugin ids of the optional peers the board reads from. */
 const PEERS = { linear: "linear", codeReview: "code-review-workspace" } as const;
 
+/** Code Review Workspace's folder reviews and report loop arrived in 1.8.0. */
+const CODE_REVIEW_MIN_VERSION = [1, 8, 0] as const;
+
+/** Whether a `major.minor.patch` version is at least `min`; anything unparsable is not. */
+function versionAtLeast(version: string, min: readonly number[]): boolean {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+  if (!match) return false;
+  for (let i = 0; i < min.length; i++) {
+    const part = Number(match[i + 1]);
+    if (part !== min[i]) return part > min[i]!;
+  }
+  return true;
+}
+
 const exportSchema = z.object({
   settings: z.record(z.string(), z.string()),
   tables: z.record(z.string(), z.array(z.record(z.string(), z.unknown()))),
@@ -62,12 +76,16 @@ export class Conductor {
     return this.integrations;
   }
 
-  /** Which optional plugins are running; read once per sweep. */
+  /** Which optional plugins are running, Code Review Workspace only from 1.8.0; read once per sweep. */
   async refreshIntegrations(): Promise<Integrations> {
     try {
       const { plugins } = await this.bb.sdk.plugins.list();
-      const running = (id: string) => plugins.some((p) => p.id === id && p.enabled && p.status === "running");
-      this.integrations = { linear: running(PEERS.linear), codeReview: running(PEERS.codeReview) };
+      const running = (id: string) => plugins.find((p) => p.id === id && p.enabled && p.status === "running");
+      const codeReview = running(PEERS.codeReview);
+      this.integrations = {
+        linear: running(PEERS.linear) !== undefined,
+        codeReview: codeReview !== undefined && versionAtLeast(codeReview.version ?? "", CODE_REVIEW_MIN_VERSION),
+      };
     } catch (error) {
       this.bb.log.warn(`plugins.list: ${String(error)}`);
     }

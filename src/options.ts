@@ -93,7 +93,7 @@ export interface RuleText {
   /** Shown in the settings page under the switch. */
   summary: string;
   /** What agents are told while the switch is on. */
-  text: (userName: string) => string;
+  text: (userName: string, ticketKey: string) => string;
   /** Hidden when a needed plugin is missing. */
   needs?: "code-review-workspace";
 }
@@ -143,10 +143,16 @@ export const RULES: RuleText[] = [
   {
     id: "codeReviewRounds",
     title: "Code review rounds",
-    summary: "Agents open a Code Review Workspace round after each commit set and act only on what you send back.",
+    summary:
+      "Agents open a Code Review Workspace review of their folder after each commit set, report on each comment you send, and act only on what you send back.",
     needs: "code-review-workspace",
-    text: (user) =>
-      `After each set of commits, open a review round with \`bb review <your-branch> --base <base>\` and end your turn with the review key. Act only on what ${user} sends back from the review.`,
+    text: (user, key) =>
+      [
+        `When a set of commits is ready for review, run \`bb review\` with nothing after it in this ticket's own worktree, the first time with \`--context "${key}: <ticket title>"\`, and end your turn with the review's id. Don't open one in a folder shared with other tickets or the orchestrator: its comments would go to the top thread working there.`,
+        `When ${user} sends comments, fix each and report it by its id with \`bb review report <id> done|declined --note "..."\` (\`--commit <sha>\` when a commit holds the fix). Once all are reported, your subagents' work included, run \`bb review ready\`.`,
+        `Don't push until ${user} or the review says so. When Push asks you to commit, commit what was reviewed and run \`bb review report --commit <sha>\` before pushing, then do what it prints: push exactly that commit, or wait. Never force-push.`,
+        `Act only on what ${user} sends back from the review.`,
+      ].join(" "),
   },
 ];
 
@@ -170,7 +176,7 @@ export function agentInstructions(
   for (const rule of RULES) {
     if (!options.rules[rule.id]) continue;
     if (rule.needs === "code-review-workspace" && !available.codeReview) continue;
-    lines.push(`- ${rule.text(options.userName)}`);
+    lines.push(`- ${rule.text(options.userName, ticket.key)}`);
   }
   const extra = options.extraRules.trim();
   if (extra) {

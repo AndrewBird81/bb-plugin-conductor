@@ -36,7 +36,14 @@ function thread(id: string, parentThreadId: string, title: string, extra = {}) {
 }
 
 async function setup(
-  options: { world?: Partial<World>; board?: Record<string, unknown>; peers?: string[]; noBoard?: boolean } = {},
+  options: {
+    world?: Partial<World>;
+    board?: Record<string, unknown>;
+    peers?: string[];
+    /** Installed versions by plugin id; Code Review Workspace defaults to 1.9.0, undefined leaves it out. */
+    peerVersions?: Record<string, string | undefined>;
+    noBoard?: boolean;
+  } = {},
 ) {
   const world: World = {
     children: {
@@ -130,9 +137,17 @@ async function setup(
         }),
       },
       plugins: {
-        list: async () => ({
-          plugins: (options.peers ?? ["linear", "code-review-workspace"]).map((id) => ({ id, status: "running", enabled: true })),
-        }),
+        list: async () => {
+          const versions: Record<string, string | undefined> = { "code-review-workspace": "1.9.0", ...options.peerVersions };
+          return {
+            plugins: (options.peers ?? ["linear", "code-review-workspace"]).map((id) => ({
+              id,
+              status: "running",
+              enabled: true,
+              version: id in versions ? versions[id] : "1.0.0",
+            })),
+          };
+        },
         callRpc: async (args: { pluginId: string; method: string; input: unknown; outputSchema: { parse(v: unknown): unknown } }) => {
           const raw = (() => {
             if (args.pluginId === "linear" && args.method === "threadIssues") {
@@ -283,6 +298,21 @@ describe("ticket discovery", () => {
     expect(board.sweepError).toBeNull();
     expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ title: "avatar uploads", linearUrl: null, stage: "planning" });
     expect(board.reviewsWaiting).toEqual([]);
+  });
+
+  it("leaves Code Review Workspace off before 1.8.0", async () => {
+    const { harness } = await setup({ peerVersions: { "code-review-workspace": "1.7.4" } });
+    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.integrations).toEqual({ linear: true, codeReview: false });
+    expect(board.reviewsWaiting).toEqual([]);
+  });
+
+  it("compares Code Review Workspace versions by number, and reads an odd or missing one as too old", async () => {
+    for (const [version, codeReview] of [["1.10.0", true], ["v1.8.0", true], ["1.8", false], ["soon", false], [undefined, false]] as const) {
+      const { harness } = await setup({ peerVersions: { "code-review-workspace": version } });
+      const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+      expect(board.integrations, String(version)).toEqual({ linear: true, codeReview });
+    }
   });
 });
 
@@ -733,6 +763,29 @@ describe("agent configuration", () => {
     expect(config.instructions).not.toContain("conductor_ask_decision");
     expect(config.instructions).toContain("stacked PRs by layer");
     expect(config.instructions).toContain("Rules Sam set for this board (board configuration, quoted):\n> Never deploy.\n> Ask before merging.");
+  });
+
+  it("tells agents the Code Review Workspace folder-review loop only from 1.8.0", async () => {
+    const lead = { thread: { id: "thr_lead1" }, pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "lead" } };
+    const board = { userName: "Sam", rules: { codeReviewRounds: true } };
+
+    const on = await resolve((await setup({ board })).harness, lead);
+    expect(on.instructions).toContain(
+      'run `bb review` with nothing after it in this ticket\'s own worktree, the first time with `--context "ABC-101: <ticket title>"`',
+    );
+    expect(on.instructions).toContain("Don't open one in a folder shared with other tickets or the orchestrator");
+    expect(on.instructions).toContain('`bb review report <id> done|declined --note "..."`');
+    expect(on.instructions).toContain("run `bb review ready`");
+    expect(on.instructions).toContain("Don't push until Sam or the review says so.");
+    expect(on.instructions).toContain(
+      "run `bb review report --commit <sha>` before pushing, then do what it prints: push exactly that commit, or wait. Never force-push.",
+    );
+    expect(on.instructions).toContain("Act only on what Sam sends back from the review.");
+
+    const old = await resolve((await setup({ board, peerVersions: { "code-review-workspace": "1.7.9" } })).harness, lead);
+    expect(old.instructions).not.toContain("bb review");
+    const missing = await resolve((await setup({ board, peers: ["linear"] })).harness, lead);
+    expect(missing.instructions).not.toContain("bb review");
   });
 
   it("never mentions a person unless the board names one", async () => {
