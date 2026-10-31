@@ -19,7 +19,7 @@ import {
 } from "./contract";
 import { discoverTickets } from "./discovery";
 import { compileRegex, DEFAULT_TICKET_PATTERN, milestoneFor, type BoardOptions } from "./options";
-import { linearIssue, linearResolve, reviewsForThreads } from "./peers";
+import { codeReviews, linearIssue, linearResolve, type LinkedReview } from "./peers";
 import { checkPlanPath, PLAN_MAX_BYTES } from "./plans";
 import { decideStage } from "./stages";
 import type { BoardStore, NewDecision } from "./store";
@@ -50,6 +50,10 @@ interface Facts {
 
 /** Reported stages (or none) in which a plan can still be waiting for review. */
 const PLANNING_STAGES = new Set<Stage | null>([null, "planning", "plan-review"]);
+
+/** Whether `text` names the ticket `key` whole: ABC-1 is not in abc-12. */
+const namesKey = (text: string | null, key: string) =>
+  !!text && new RegExp(`(?<![a-z0-9])${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9])`, "i").test(text);
 
 const isRunning = (status: string | undefined) =>
   status !== undefined && (RUNNING_STATUSES as readonly string[]).includes(status);
@@ -124,7 +128,7 @@ export class BoardEngine {
       }
     }
     this.facts.statuses = statuses;
-    await this.refreshReviews(ids);
+    await this.refreshReviews();
     await this.inferPlanRounds(this.store.listTickets());
   }
 
@@ -132,8 +136,9 @@ export class BoardEngine {
    * Re-reads open rounds. Code Review Workspace sends no change signal, so
    * reads and reports refresh them instead of waiting for the next sweep.
    */
-  private async refreshReviews(ids = this.ticketThreadIds()): Promise<boolean> {
-    const reviews = this.integrations().codeReview ? await reviewsForThreads(this.bb, ids) : [];
+  private async refreshReviews(): Promise<boolean> {
+    const reviews =
+      this.integrations().codeReview && this.store.listTickets().length > 0 ? await codeReviews(this.bb) : [];
     // Archived or approved rounds no longer wait on the user.
     const before = this.reviewKey();
     this.facts.reviews = this.assignReviews(
@@ -144,7 +149,7 @@ export class BoardEngine {
   }
 
   private reviewKey(): string {
-    return this.facts.reviews.map((r) => `${r.targetKey}:${r.state}:${r.ticketKey}`).sort().join(",");
+    return this.facts.reviews.map((r) => `${r.targetKey}:${r.state}:${r.ticketKey}:${r.label}`).sort().join(",");
   }
 
   /** Re-reads rounds now; true when one moved. */
@@ -157,14 +162,31 @@ export class BoardEngine {
     if (Date.now() - this.reviewsReadAt > maxAgeMs) await this.refreshReviews();
   }
 
-  /** Assigns each review round to one ticket of the thread that opened it. */
-  private assignReviews(reviews: Review[]): WaitingReview[] {
-    return reviews.flatMap((review) => {
-        const links = this.store.threadTickets(review.threadId);
-        if (links.length === 0) return [];
-        const ref = (review.gitRef ?? "").toLowerCase();
-        const named = links.find((link) => ref.includes(link.ticketKey.toLowerCase()));
-      return [{ ...review, ticketKey: (named ?? links[0]!).ticketKey }];
+  /**
+   * Assigns each review to one ticket, from its threads' tickets when it has
+   * any, else its folder's only ticket, else the folder's tickets its branch
+   * names. Of several, the ticket its branch names, then its head's, then its
+   * ref's, then the one on its branch, then the first.
+   */
+  private assignReviews(reviews: LinkedReview[]): WaitingReview[] {
+    const tickets = this.store.listTickets();
+    return reviews.flatMap(({ threadIds, environmentId, branch, ...review }) => {
+      const linked = threadIds
+        .flatMap((id) => this.store.threadTickets(id))
+        .flatMap((link) => tickets.filter((t) => t.key === link.ticketKey));
+      const inFolder = tickets.filter((t) => environmentId && t.environmentId === environmentId);
+      const candidates =
+        linked.length > 0 ? linked : inFolder.length === 1 ? inFolder : inFolder.filter((t) => namesKey(branch, t.key));
+      if (candidates.length === 0) return [];
+      // A stacked PR's ref is base...head, and its base names the ticket below.
+      const head = review.gitRef?.split("...").at(-1) ?? null;
+      const ticket =
+        candidates.find((t) => namesKey(branch, t.key)) ??
+        candidates.find((t) => namesKey(head, t.key)) ??
+        candidates.find((t) => namesKey(review.gitRef, t.key)) ??
+        candidates.find((t) => branch && t.branch === branch) ??
+        candidates[0]!;
+      return [{ ...review, ticketKey: ticket.key }];
     });
   }
 
@@ -325,7 +347,12 @@ export class BoardEngine {
       stage: decision.stage,
       stageSource: decision.source,
       openReview: review
-        ? { targetKey: review.targetKey, gitRef: review.gitRef, state: review.state as "needs-review" | "with-agent" }
+        ? {
+            targetKey: review.targetKey,
+            gitRef: review.gitRef,
+            label: review.label,
+            state: review.state as "needs-review" | "with-agent",
+          }
         : null,
     };
   }
@@ -363,7 +390,7 @@ export class BoardEngine {
     const issueId = this.store.linearIssueId(key);
     const [linear, reviews] = await Promise.all([
       issueId && this.integrations().linear ? linearIssue(this.bb, issueId) : Promise.resolve(null),
-      this.integrations().codeReview ? reviewsForThreads(this.bb, this.store.threadIds(key)) : Promise.resolve([]),
+      this.integrations().codeReview ? codeReviews(this.bb) : Promise.resolve([]),
     ]);
     return {
       ticket: this.withStage(stored),

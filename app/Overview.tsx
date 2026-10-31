@@ -448,17 +448,25 @@ function PlanWaitingCard({ round }: { round: PlanRound }) {
 }
 
 function CardNote({ ticket }: { ticket: Ticket }) {
-  if (ticket.openReview?.state === "with-agent") {
-    return <p className="text-[12.5px] text-muted-foreground">Your review comments are with the agent.</p>;
-  }
-  if (ticket.openReview) {
+  const review = ticket.openReview;
+  if (review?.state === "with-agent") {
     return (
-      <a
-        className="text-[12.5px] text-[var(--brand,var(--attention))] hover:underline"
-        href={`/plugins/code-review-workspace/review/${encodeURIComponent(ticket.openReview.targetKey)}`}
-      >
-        A review round is open for you.
-      </a>
+      <p className="text-[12.5px] text-muted-foreground">
+        {review.label ? `With the agent: ${review.label}.` : "Your review comments are with the agent."}
+      </p>
+    );
+  }
+  if (review) {
+    return (
+      <p className="text-[12.5px]">
+        <a
+          className="text-[var(--brand,var(--attention))] hover:underline"
+          href={`/plugins/code-review-workspace/review/${encodeURIComponent(review.targetKey)}`}
+        >
+          A review round is open for you.
+        </a>
+        {review.label && <span className="text-muted-foreground"> {review.label}</span>}
+      </p>
     );
   }
   const round = ticket.planRound;

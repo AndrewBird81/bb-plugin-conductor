@@ -111,7 +111,12 @@ export const ticketSchema = z.object({
   planRound: planRoundSchema.nullable(),
   reportedAt: z.number().nullable(),
   openReview: z
-    .object({ targetKey: z.string(), gitRef: z.string().nullable(), state: z.enum(["needs-review", "with-agent"]) })
+    .object({
+      targetKey: z.string(),
+      gitRef: z.string().nullable(),
+      label: z.string().nullable(),
+      state: z.enum(["needs-review", "with-agent"]),
+    })
     .nullable(),
   openDecisions: z.number().int(),
   blockingDecisions: z.number().int(),
@@ -152,20 +157,23 @@ export const stageEventSchema = z.object({
 export type StageEvent = z.infer<typeof stageEventSchema>;
 
 /**
- * needs-review waits on the user; with-agent means they sent comments and the agent
- * is fixing them; approved and archived rounds are finished.
+ * needs-review waits on the user; with-agent means they sent comments or a Push
+ * and the agent is on it; idle waits on neither (the PR's author, a draft, a
+ * snooze, a paused folder); approved and archived rounds are finished.
  */
-export const reviewStateSchema = z.enum(["needs-review", "with-agent", "approved", "archived"]);
+export const reviewStateSchema = z.enum(["needs-review", "with-agent", "idle", "approved", "archived"]);
 export type ReviewState = z.infer<typeof reviewStateSchema>;
 
 export const reviewSchema = z.object({
   targetKey: z.string(),
   gitRef: z.string().nullable(),
+  /** Code Review Workspace's own status, such as "Ready to re-review" or "2 of 6 reported". */
   label: z.string().nullable(),
   state: reviewStateSchema,
-  threadId: z.string(),
+  /** The thread that fixes its comments; null when it has none. */
+  threadId: z.string().nullable(),
   createdAt: z.number().nullable(),
-  /** When the user last sent comments or an approval from this round. */
+  /** When the user last sent comments, an approval or a Push from this round. */
   sentAt: z.number().nullable(),
 });
 export type Review = z.infer<typeof reviewSchema>;

@@ -210,7 +210,7 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
       {integrations?.codeReview && (
         <Section title="Reviews" count={reviews.length}>
           {reviews.length === 0 ? (
-            <Empty>No Code Review Workspace reviews from this ticket's threads.</Empty>
+            <Empty>No Code Review Workspace reviews for this ticket.</Empty>
           ) : (
             <ul className="divide-y divide-border rounded-lg border border-border text-sm">
               {reviews.map((r) => (
@@ -221,7 +221,7 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
                   >
                     {r.gitRef ?? r.targetKey}
                   </a>
-                  <span className="text-muted-foreground">{REVIEW_STATE_LABELS[r.state]}</span>
+                  <span className="text-muted-foreground">{r.label ?? REVIEW_STATE_LABELS[r.state]}</span>
                   {r.createdAt && (
                     <span className="ml-auto text-xs text-muted-foreground">{formatTime(r.createdAt)}</span>
                   )}
@@ -346,6 +346,7 @@ function LinearSection({ boardId, linear }: { boardId: number; linear: NonNullab
 const REVIEW_STATE_LABELS = {
   "needs-review": "needs your review",
   "with-agent": "your comments are with the agent",
+  idle: "not waiting on you",
   approved: "approved",
   archived: "archived",
 } as const;

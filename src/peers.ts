@@ -104,39 +104,134 @@ export async function linearIssue(
   }
 }
 
-const sentSchema = z.object({ at: z.number() }).passthrough().nullable().optional().catch(null);
+const atSchema = z.object({ at: z.number() }).nullable().optional().catch(null);
+const threadRefs = z
+  .array(z.object({ threadId: z.string().nullable().catch(null) }).nullable().catch(null))
+  .optional()
+  .catch([]);
+/** Sends, with whether each came back ready or its thread stopped before that. */
+const sendRefs = z
+  .array(
+    z
+      .object({
+        threadId: z.string().nullable().catch(null),
+        at: z.number().nullable().catch(null),
+        readyAt: z.number().nullable().optional().catch(null),
+        stopped: z.object({ why: z.string().nullable().catch(null) }).nullable().optional().catch(null),
+      })
+      .nullable()
+      .catch(null),
+  )
+  .optional()
+  .catch([]);
 
+/** A Code Review Workspace (1.8+) `listReviews` row, as far as the board reads it. */
 const reviewSchema = z.object({
   targetKey: z.string(),
   kind: z.string().nullable().optional().catch(null),
-  gitRef: z.string().nullable().catch(null),
-  sourceThreadId: z.string().nullable().catch(null),
-  sourceThreadAt: z.number().nullable().optional().catch(null),
-  userArchivedAt: z.number().nullable().catch(null),
-  turnGroup: z.string().nullable().optional().catch(null),
-  approvalSent: sentSchema,
-  sent: sentSchema,
-  createdAt: z.number().nullable().catch(null),
-  turn: z.object({ label: z.string().nullable().catch(null) }).nullable().catch(null),
+  gitRef: z.string().nullable().optional().catch(null),
+  createdAt: z.number().nullable().optional().catch(null),
+  status: z.string().nullable().optional().catch(null),
+  archivedAt: z.number().nullable().optional().catch(null),
+  userArchivedAt: z.number().nullable().optional().catch(null),
+  mergedInto: z.string().nullable().optional().catch(null),
+  ownPr: z.boolean().nullable().optional().catch(null),
+  sourceThreadId: z.string().nullable().optional().catch(null),
+  mainThread: z.object({ threadId: z.string() }).nullable().optional().catch(null),
+  implementers: threadRefs,
+  sends: sendRefs,
+  fixes: z.object({ sent: z.number(), reported: z.number() }).nullable().optional().catch(null),
+  feature: z
+    .object({
+      environmentId: z.string().nullable().catch(null),
+      branch: z.string().nullable().catch(null),
+      changedFiles: z.number().nullable().optional().catch(null),
+    })
+    .nullable()
+    .optional()
+    .catch(null),
+  push: z.object({ state: z.string(), at: z.number().nullable().catch(null) }).nullable().optional().catch(null),
+  approvalSent: atSchema,
+  sent: atSchema,
+  turn: z
+    .object({
+      group: z.string().nullable().catch(null),
+      reason: z.string().nullable().catch(null),
+      label: z.string().nullable().catch(null),
+    })
+    .nullable()
+    .optional()
+    .catch(null),
 });
+type ReviewRow = z.infer<typeof reviewSchema>;
+
+/** When the user last sent comments to the review's thread. */
+const lastSendAt = (review: ReviewRow) =>
+  Math.max(review.sent?.at ?? 0, ...(review.sends ?? []).map((send) => send?.at ?? 0));
 
 /**
- * Where a round stands for the user. A local round (`bb review <ref>`) always
- * reads "Ready" in Code Review Workspace, so what he sent back to the agent
- * after the round opened decides it; a PR round follows its turn group.
+ * A local review or own PR the user approved in its thread, after the last
+ * Send, until its folder moves past it; GitHub never records that, so the
+ * turn doesn't show it.
  */
-export function reviewState(review: z.infer<typeof reviewSchema>): ReviewState {
-  if (review.userArchivedAt != null || review.turnGroup === "archive") return "archived";
-  const opened = review.sourceThreadAt ?? review.createdAt ?? 0;
-  const approvedAt = review.approvalSent?.at ?? null;
-  const commentedAt = review.sent?.at ?? null;
-  if (approvedAt !== null && approvedAt >= opened && approvedAt >= (commentedAt ?? 0)) return "approved";
-  if (commentedAt !== null && commentedAt >= opened) return "with-agent";
-  if (review.kind !== "ref" && review.turnGroup) {
-    if (review.turnGroup === "reviewed") return "approved";
-    if (review.turnGroup === "waiting") return "with-agent";
-  }
-  return "needs-review";
+const approvedInThread = (review: ReviewRow) =>
+  (review.kind === "ref" || review.ownPr === true) &&
+  review.approvalSent != null &&
+  review.approvalSent.at >= lastSendAt(review) &&
+  // Rows carry no revision, so a later round on the same folder otherwise shows once the agent reports its stage.
+  !((review.feature?.changedFiles ?? 0) > 0) &&
+  review.status !== "generating";
+
+/**
+ * Comments the last Send has out unreported, its thread neither done nor
+ * archived or deleted, as Code Review Workspace's `fixesState` reads them;
+ * its turn says so only for local reviews, not one that became its own PR's.
+ */
+function fixesOut(review: ReviewRow): boolean {
+  const send = review.sends?.at(-1);
+  const gone = send?.stopped?.why === "archived" || send?.stopped?.why === "deleted";
+  return !!send && send.readyAt == null && !gone && !!review.fixes && review.fixes.reported < review.fixes.sent;
+}
+
+/** A Push the main thread is committing or pushing. */
+const pushing = (review: ReviewRow) => review.push?.state === "committing" || review.push?.state === "pushing";
+
+/** What the review shows: a Push under way, an approval in its thread or comments out, else its turn's label. */
+function reviewLabel(review: ReviewRow): string | null {
+  if (review.push?.state === "committing") return "Committing for Push";
+  if (review.push?.state === "pushing") return "Pushing";
+  if (approvedInThread(review)) return "Approved";
+  // An own PR's turn doesn't count comments out; this is Code Review Workspace's wording when a local one does.
+  const fixes = review.fixes;
+  if (fixes && fixesOut(review) && review.turn?.reason !== "fixes-sent") return `${fixes.reported} of ${fixes.sent} reported`;
+  return review.turn?.label ?? null;
+}
+
+/** Where a review stands for the user, from Code Review Workspace's live turn. */
+export function reviewState(review: ReviewRow): ReviewState {
+  const turn = review.turn;
+  if (turn?.group === "archive" || review.archivedAt != null || review.userArchivedAt != null) return "archived";
+  // Its folder removed, nothing on it is left to do, so the ticket moves on.
+  if (turn?.reason === "folder-gone") return "idle";
+  if (pushing(review)) return "with-agent";
+  if (turn?.reason === "approved" || approvedInThread(review)) return "approved";
+  if (turn?.reason === "fixes-sent" || fixesOut(review)) return "with-agent";
+  if (turn?.group === "needs") return "needs-review";
+  return "idle";
+}
+
+/** A review with what ties it to tickets: its threads and its folder. */
+export type LinkedReview = Review & { threadIds: string[]; environmentId: string | null; branch: string | null };
+
+/** The review's main thread, the ones before it, its Sends' threads and the thread that opened it. */
+function linkedThreads(review: ReviewRow): string[] {
+  const ids = [
+    review.mainThread?.threadId,
+    ...(review.implementers ?? []).map((thread) => thread?.threadId),
+    ...(review.sends ?? []).map((send) => send?.threadId),
+    review.sourceThreadId,
+  ];
+  return [...new Set(ids.filter((id): id is string => !!id))];
 }
 
 // Rows are parsed one by one so one odd review cannot hide the rest.
@@ -184,12 +279,11 @@ export async function linearResolve(
   return out;
 }
 
-/** Code Review Workspace reviews opened from any of these threads. */
-export async function reviewsForThreads(
-  bb: BbPluginApi,
-  threadIds: string[],
-): Promise<Review[]> {
-  if (threadIds.length === 0) return [];
+/**
+ * Every Code Review Workspace review, newest first. A review merged into
+ * another is left out: its key leads to the one that goes on.
+ */
+export async function codeReviews(bb: BbPluginApi): Promise<LinkedReview[]> {
   try {
     const { reviews } = await bb.sdk.plugins.callRpc({
       pluginId: "code-review-workspace",
@@ -197,21 +291,24 @@ export async function reviewsForThreads(
       input: null,
       outputSchema: reviewsSchema,
     });
-    const wanted = new Set(threadIds);
     return reviews
       .flatMap((raw) => {
         const parsed = reviewSchema.safeParse(raw);
-        return parsed.success ? [parsed.data] : [];
+        return parsed.success && !parsed.data.mergedInto ? [parsed.data] : [];
       })
-      .filter((review) => review.sourceThreadId && wanted.has(review.sourceThreadId))
       .map((review) => ({
         targetKey: review.targetKey,
-        gitRef: review.gitRef,
-        label: review.turn?.label ?? null,
+        gitRef: review.gitRef ?? null,
+        label: reviewLabel(review),
         state: reviewState(review),
-        threadId: review.sourceThreadId!,
-        createdAt: review.createdAt,
-        sentAt: Math.max(review.sent?.at ?? 0, review.approvalSent?.at ?? 0) || null,
+        threadId: review.mainThread?.threadId ?? review.sourceThreadId ?? null,
+        createdAt: review.createdAt ?? null,
+        sentAt:
+          Math.max(lastSendAt(review), review.approvalSent?.at ?? 0, pushing(review) ? (review.push?.at ?? 0) : 0) ||
+          null,
+        threadIds: linkedThreads(review),
+        environmentId: review.feature?.environmentId ?? null,
+        branch: review.feature?.branch ?? null,
       }))
       .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
   } catch (error) {
