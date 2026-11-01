@@ -311,7 +311,7 @@ describe.each([
   ["with", true],
   ["without", false],
 ])("Waiting on you and ticket links %s Code Review Workspace", (_, codeReview) => {
-  const waitingReview = { targetKey: "br-104", gitRef: "bb/abc-104", label: "Ready", state: "needs-review" as const, threadId: "thr_lead1", createdAt: 5, sentAt: null, ticketKey: "ABC-104" };
+  const waitingReview = { targetKey: "br-104", id: "media-jobs:bb/abc-104", label: "Ready", state: "needs-review" as const, threadId: "thr_lead1", createdAt: 5, since: 5, ticketKey: "ABC-104" };
   // The server sends no review rounds without Code Review Workspace; the board must hide them on the flag alone.
   const current: Board = {
     ...board,
@@ -417,6 +417,26 @@ describe.each([
     expect(card.getByRole("button", { name: "Open thread that asked D-7" })).toBeTruthy();
     expect(slot.getByText("Pull requests")).toBeTruthy();
     expect(slot.queryByRole("heading", { name: /^Reviews/ }) !== null).toBe(codeReview);
+  });
+});
+
+describe("review polling", () => {
+  it("asks the server to re-read reviews every few seconds, even when Code Review Workspace didn't answer last time", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const current = { ...board, integrations: { linear: true, codeReview: false } };
+      const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
+        rpc: handlers({ ...rpc([decision], [summary], current), "reviews.poll": () => ({ changed: false }) }),
+      });
+      cleanup = () => slot.lifecycle.unmount();
+      await slot.findByText("Accept avatar uploads on sign-up");
+      const polls = () => slot.inspection.rpcCalls.filter((call) => call.method === "reviews.poll").length;
+      expect(polls()).toBe(0);
+      vi.advanceTimersByTime(5_000);
+      await waitFor(() => expect(polls()).toBe(1));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -621,12 +641,12 @@ describe("after a plan decision", () => {
 describe("review changes", () => {
   const review: Review = {
     targetKey: "br-live",
-    gitRef: "bb/abc-101",
+    id: "accounts-api:bb/abc-101",
     label: "2 of 6 reported",
     state: "with-agent",
     threadId: "thr_lead1",
     createdAt: 5,
-    sentAt: 6,
+    since: 6,
   };
   const detail = (reviews: Review[]): TicketDetail => ({ ticket, decisions: [], stageEvents: [], reviews, linear: null });
   const ticketRpc = (reviews: Review[], codeReview = true, start?: () => { targetKey: string }) => {

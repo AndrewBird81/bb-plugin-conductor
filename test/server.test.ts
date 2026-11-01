@@ -1,3 +1,4 @@
+import { experimental_PluginRpcCallError } from "@get-bb/plugin-sdk";
 import {
   createFakePluginHost,
   makePluginAgentConfigurationContext,
@@ -19,10 +20,10 @@ interface World {
   replies: Record<string, { createdAt: number; data: Record<string, unknown> }[]>;
   /** Overrides for the first review round (ref-1, opened from the ABC-101 lead). */
   round: Record<string, unknown>;
-  /** More Code Review Workspace rows, after the fixture's. */
+  /** More Code Review Workspace reviews, after the fixture's. */
   reviews: unknown[];
-  /** Code Review Workspace's listReviews throws. */
-  reviewsFail: boolean;
+  /** Code Review Workspace's answer to reviews.v1.status in place of the fixture's; it throws when this throws. */
+  status: (() => unknown) | null;
   /** Files on the agents' machine, by absolute path. */
   files: Record<string, string>;
   /** Code Review Workspace's reviewThreadChanges, by the thread it runs for; throws when it throws. */
@@ -43,15 +44,44 @@ function thread(id: string, parentThreadId: string, title: string, extra = {}) {
   });
 }
 
+/** A review as Code Review Workspace 1.10's reviews.v1.status lists it: local, waiting on the user, unless `extra` says otherwise. */
+function crwReview(extra: Record<string, unknown> = {}) {
+  return {
+    targetKey: "ref-0",
+    id: "accounts-api:ref-0",
+    createdAt: 1,
+    pr: null,
+    branch: null,
+    folder: null,
+    mainThreadId: null,
+    threadIds: [],
+    waitsOn: "user",
+    waitsOnThreadId: null,
+    approved: false,
+    since: 1,
+    label: "Ready",
+    archived: false,
+    mergedInto: null,
+    ...extra,
+  };
+}
+
+/** Overrides that archive a review. */
+const ARCHIVED = { waitsOn: "nobody", archived: true, label: "Archived" };
+
+/** What BB's callRpc throws when a plugin's RPC fails, as Code Review Workspace's guide lists the cases. */
+const rpcError = (status: number, code: string | null, message: string) =>
+  experimental_PluginRpcCallError.from({ code: code ?? `http_${status}`, status, message: `HTTP ${status}: ${message}` });
+/** Code Review Workspace before 1.10, or still starting. */
+const notYet = () => {
+  throw rpcError(404, "unknown_method", 'plugin "code-review-workspace" has no rpc method "reviews.v1.status"');
+};
+const notRunning = () => {
+  throw rpcError(503, null, 'plugin "code-review-workspace" is not running (status: disabled)');
+};
+
 async function setup(
-  options: {
-    world?: Partial<World>;
-    board?: Record<string, unknown>;
-    peers?: string[];
-    /** Installed versions by plugin id; Code Review Workspace defaults to 1.9.0, undefined leaves it out. */
-    peerVersions?: Record<string, string | undefined>;
-    noBoard?: boolean;
-  } = {},
+  options: { world?: Partial<World>; board?: Record<string, unknown>; peers?: string[]; noBoard?: boolean } = {},
 ) {
   const world: World = {
     children: {
@@ -79,12 +109,13 @@ async function setup(
     replies: {},
     round: {},
     reviews: [],
-    reviewsFail: false,
+    status: null,
     files: {},
     startReview: () => ({ ok: true, targetKey: "br-started" }),
     started: [],
     ...options.world,
   };
+  const peers = options.peers ?? ["linear", "code-review-workspace"];
   const metadata = new Map<string, Record<string, unknown>>();
   const sent: { threadId: string; text: string; originPluginId?: string; mode: string }[] = [];
 
@@ -149,17 +180,7 @@ async function setup(
         }),
       },
       plugins: {
-        list: async () => {
-          const versions: Record<string, string | undefined> = { "code-review-workspace": "1.9.0", ...options.peerVersions };
-          return {
-            plugins: (options.peers ?? ["linear", "code-review-workspace"]).map((id) => ({
-              id,
-              status: "running",
-              enabled: true,
-              version: id in versions ? versions[id] : "1.0.0",
-            })),
-          };
-        },
+        list: async () => ({ plugins: peers.map((id) => ({ id, status: "running", enabled: true })) }),
         callRpc: async (args: { pluginId: string; method: string; input: unknown; outputSchema: { parse(v: unknown): unknown } }) => {
           const raw = (() => {
             if (args.pluginId === "linear" && args.method === "threadIssues") {
@@ -193,15 +214,16 @@ async function setup(
                 },
               };
             }
-            if (args.pluginId === "code-review-workspace" && args.method === "listReviews") {
-              if (world.reviewsFail) throw new Error("code-review-workspace is not running");
-              // Synthetic rows shaped like Code Review Workspace 1.9's.
+            if (args.pluginId === "code-review-workspace" && !peers.includes(args.pluginId)) {
+              throw rpcError(404, null, 'unknown plugin "code-review-workspace"');
+            }
+            if (args.pluginId === "code-review-workspace" && args.method === "reviews.v1.status") {
+              if (world.status) return world.status();
               return {
                 reviews: [
-                  { targetKey: "ref-1", kind: "ref", gitRef: "origin/base...abc-101", sourceThreadId: "thr_lead1", userArchivedAt: null, approvalSent: null, sent: null, sends: [], createdAt: 5, turn: { group: "needs", reason: "new", label: "Ready" }, ...world.round },
-                  { targetKey: "ref-2", kind: "ref", gitRef: "x...y", sourceThreadId: "thr_someone_else", userArchivedAt: null, approvalSent: null, createdAt: 6, turn: { group: "needs", reason: "new", label: "Ready" } },
-                  { targetKey: "ref-3", kind: "ref", gitRef: "a...b", sourceThreadId: "thr_impl1", userArchivedAt: 9, createdAt: 4, turn: { group: "archive", reason: "archived", label: "Archived" } },
-                  { targetKey: 42, sourceThreadId: "thr_lead1" },
+                  crwReview({ targetKey: "ref-1", id: "accounts-api:abc-101", createdAt: 6, mainThreadId: "thr_lead1", threadIds: ["thr_lead1"], ...world.round }),
+                  crwReview({ targetKey: "ref-2", id: "x:y", createdAt: 5, mainThreadId: "thr_someone_else", threadIds: ["thr_someone_else"] }),
+                  crwReview({ targetKey: "ref-3", id: "a:b", createdAt: 4, mainThreadId: "thr_impl1", threadIds: ["thr_impl1"], ...ARCHIVED }),
                   ...world.reviews,
                 ],
               };
@@ -228,6 +250,12 @@ async function setup(
 }
 
 type Harness = Awaited<ReturnType<typeof setup>>["harness"];
+
+/** The configuration the ABC-101 lead's next session gets. */
+const leadConfig = (harness: Harness) =>
+  harness.behavior.resolveAgentConfiguration(
+    makePluginAgentConfigurationContext({ thread: { id: "thr_lead1" }, pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "lead" } }),
+  );
 
 async function ask(harness: Harness, threadId: string, overrides: Record<string, unknown> = {}) {
   return harness.behavior.callAgentTool(
@@ -267,7 +295,7 @@ describe("ticket discovery", () => {
       base: "origin/abc-103-api-route",
       milestone: null,
       stage: "code-review",
-      openReview: { targetKey: "ref-1", gitRef: "origin/base...abc-101", state: "needs-review" },
+      openReview: { targetKey: "ref-1", id: "accounts-api:abc-101", state: "needs-review" },
     });
     expect(abc102).toMatchObject({ title: "image sizes", repo: "web-api", milestone: null, linearUrl: null });
   });
@@ -318,21 +346,6 @@ describe("ticket discovery", () => {
     expect(board.sweepError).toBeNull();
     expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ title: "avatar uploads", linearUrl: null, stage: "planning" });
     expect(board.reviewsWaiting).toEqual([]);
-  });
-
-  it("leaves Code Review Workspace off before 1.8.0", async () => {
-    const { harness } = await setup({ peerVersions: { "code-review-workspace": "1.7.4" } });
-    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
-    expect(board.integrations).toEqual({ linear: true, codeReview: false });
-    expect(board.reviewsWaiting).toEqual([]);
-  });
-
-  it("compares Code Review Workspace versions by number, and reads an odd or missing one as too old", async () => {
-    for (const [version, codeReview] of [["1.10.0", true], ["v1.8.0", true], ["1.8", false], ["soon", false], [undefined, false]] as const) {
-      const { harness } = await setup({ peerVersions: { "code-review-workspace": version } });
-      const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
-      expect(board.integrations, String(version)).toEqual({ linear: true, codeReview });
-    }
   });
 });
 
@@ -515,13 +528,17 @@ describe("stage reports", () => {
 });
 
 describe("review rounds", () => {
+  const boardOf = async (harness: Harness) => (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+  const detailOf = async (harness: Harness, key: string) =>
+    ((await harness.behavior.callRpc("board.ticket", { boardId: 1, key })) as { detail: TicketDetail }).detail;
+  const poll = (harness: Harness) => harness.behavior.callRpc("reviews.poll", null);
+
   it("drops a round from Code review as soon as it is archived, without waiting for a sweep", async () => {
     const { harness, world } = await setup();
-    const stageOf = async () =>
-      ((await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board).tickets.find((t) => t.key === "ABC-101")!.stage;
+    const stageOf = async () => (await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")!.stage;
     expect(await stageOf()).toBe("code-review");
 
-    world.round = { userArchivedAt: 99, turn: { group: "archive", reason: "archived", label: "Archived" } };
+    world.round = ARCHIVED;
     const result = await harness.behavior.callAgentTool(
       REPORT_TOOL,
       { stage: "draft-pr", prs: [{ repo: "accounts-api", number: 76 }] },
@@ -533,60 +550,122 @@ describe("review rounds", () => {
 
   it("moves a round to the agent the moment the user sends comments, found by polling", async () => {
     const { harness, world } = await setup();
-    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: false });
+    expect(await poll(harness)).toEqual({ changed: false });
 
-    world.round = {
-      sent: { at: 10, threadId: "thr_lead1", title: null, comments: [] },
-      sends: [{ at: 10, threadId: "thr_lead1" }],
-      turn: { group: "waiting", reason: "fixes-sent", label: "0 of 2 reported" },
-    };
+    world.round = { waitsOn: "agent", waitsOnThreadId: "thr_lead1", since: 10, label: "0 of 2 reported" };
     const signals = harness.realtimeSignals.length;
-    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: true });
+    expect(await poll(harness)).toEqual({ changed: true });
     expect(harness.realtimeSignals.length).toBeGreaterThan(signals);
 
-    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    const board = await boardOf(harness);
     expect(board.reviewsWaiting).toEqual([]);
     expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({
       stage: "building",
       openReview: { targetKey: "ref-1", label: "0 of 2 reported", state: "with-agent" },
     });
-    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: false });
+    expect(await poll(harness)).toEqual({ changed: false });
   });
 
   it("does not count an approved round as waiting on the user", async () => {
-    const { harness } = await setup({ world: { round: { approvalSent: { at: 10, threadId: "thr_lead1", title: null, revision: "r" } } } });
-    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    const { harness } = await setup({ world: { round: { waitsOn: "nobody", approved: true, label: "Approved" } } });
+    const board = await boardOf(harness);
     expect(board.tickets.find((t) => t.key === "ABC-101")!.stage).not.toBe("code-review");
     expect(board.reviewsWaiting).toEqual([]);
   });
 
-  // Code Review Workspace 1.8+ folder reviews (br- keys): one per checkout and branch, whichever thread opened it.
-  const folderReview = (extra: Record<string, unknown> = {}) => ({
-    targetKey: "br-0a1b2c3d4e5f6a7b",
-    kind: "ref",
-    gitRef: "bb/env_thr_lead2",
-    sourceThreadId: "thr_elsewhere",
-    mainThread: { threadId: "thr_elsewhere" },
-    implementers: [],
-    sends: [],
-    feature: { environmentId: "env_thr_lead2", branch: "bb/env_thr_lead2" },
-    approvalSent: null,
-    userArchivedAt: null,
-    archivedAt: null,
-    createdAt: 7,
-    turn: { group: "needs", reason: "new", label: "Ready" },
-    ...extra,
+  // Code Review Workspace's "Who it waits on" table (docs/plugin-api.md), and where each row leaves the ticket.
+  it.each([
+    ["a local review, nothing sent", "user", false, "needs-review", "code-review"],
+    ["comments sent to its main thread, which is fixing them, idle or not", "agent", false, "with-agent", "building"],
+    ["…then it reports them all, or runs bb review ready", "user", false, "needs-review", "code-review"],
+    ["…or it's archived or deleted first", "user", false, "needs-review", "code-review"],
+    ["comments sent from a PR's review, yours or not, being fixed", "agent", false, "with-agent", "building"],
+    ["…then a teammate comments on your PR, or someone asks you again", "user", false, "needs-review", "code-review"],
+    ["a local review approved in its main thread", "nobody", true, "approved", "planning"],
+    ["…then the folder changes, before you click Update and after", "user", false, "needs-review", "code-review"],
+    ["your own PR approved in its main thread, then new comments", "user", true, "needs-review", "code-review"],
+    ["someone else's PR you requested changes on", "author", false, "with-agent", "building"],
+    ["a Push under way", "agent", false, "with-agent", "building"],
+    ["a Push under way, approved before", "agent", true, "with-agent", "building"],
+    ["a draft PR, a snooze, a folder on another branch or removed", "nobody", false, "idle", "planning"],
+    ["a draft PR, a snooze, a folder on another branch or removed, approved before", "nobody", true, "approved", "planning"],
+  ] as const)("%s: %s, approved %s, reads as %s and leaves the ticket in %s", async (_, waitsOn, approved, state, stage) => {
+    const { harness } = await setup({ world: { round: { waitsOn, approved, since: Date.now() } } });
+    const board = await boardOf(harness);
+    const waiting = state === "needs-review" || state === "with-agent";
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({
+      stage,
+      openReview: waiting ? { targetKey: "ref-1", state } : null,
+    });
+    expect(board.reviewsWaiting.map((r) => r.targetKey)).toEqual(state === "needs-review" ? ["ref-1"] : []);
+    expect((await detailOf(harness, "ABC-101")).reviews[0]).toMatchObject({ targetKey: "ref-1", state });
   });
-  const boardOf = async (harness: Harness) => (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
-  const detailOf = async (harness: Harness, key: string) =>
-    ((await harness.behavior.callRpc("board.ticket", { boardId: 1, key })) as { detail: TicketDetail }).detail;
+
+  it("keeps a ticket in Building while its review is with the agent, until the agent reports after it went there", async () => {
+    const { harness, world } = await setup({
+      world: { round: { waitsOn: "agent", since: Date.now() - 1000, label: "1 of 2 reported" } },
+    });
+    const ticket = async () => (await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")!;
+    expect(await ticket()).toMatchObject({ stage: "building", openReview: { state: "with-agent", label: "1 of 2 reported" } });
+
+    await harness.behavior.callAgentTool(
+      REPORT_TOOL,
+      { stage: "draft-pr", prs: [{ repo: "accounts-api", number: 76 }] },
+      { threadId: "thr_lead1" },
+    );
+    expect((await ticket()).stage).toBe("draft-pr");
+
+    // Another Send after that report takes it back to the agent.
+    world.round = { waitsOn: "agent", since: Date.now() + 60_000, label: "0 of 1 reported" };
+    await poll(harness);
+    expect((await ticket()).stage).toBe("building");
+  });
+
+  it("keeps a ticket PR waiting on its author in Building until the agent reports after the review", async () => {
+    const { harness } = await setup({
+      world: {
+        round: ARCHIVED,
+        reviews: [
+          crwReview({
+            targetKey: "pr-9f8e7d6c5b4a3f2e-77",
+            id: "accounts-api#77",
+            pr: { repo: "acme/accounts-api", number: 77, url: "https://github.com/acme/accounts-api/pull/77", author: "ticket-bot" },
+            branch: "abc-101-avatars",
+            mainThreadId: "thr_lead1",
+            threadIds: ["thr_lead1"],
+            waitsOn: "author",
+            since: Date.now() - 1000,
+            label: "Changes requested",
+          }),
+        ],
+      },
+    });
+    const ticket = async () => (await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")!;
+    expect(await ticket()).toMatchObject({ stage: "building", openReview: { label: "Changes requested", state: "with-agent" } });
+
+    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "in-review" }, { threadId: "thr_lead1" });
+    expect((await ticket()).stage).toBe("in-review");
+  });
+
+  // A folder's review (br- keys): one per checkout and branch, whichever thread opened it.
+  const folderReview = (extra: Record<string, unknown> = {}) =>
+    crwReview({
+      targetKey: "br-0a1b2c3d4e5f6a7b",
+      id: "web-api:bb/env_thr_lead2",
+      createdAt: 7,
+      branch: "bb/env_thr_lead2",
+      folder: { environmentId: "env_thr_lead2" },
+      mainThreadId: "thr_elsewhere",
+      threadIds: ["thr_elsewhere"],
+      ...extra,
+    });
 
   it("finds a folder review by the ticket's checkout when no ticket thread opened it", async () => {
     const { harness } = await setup({ world: { reviews: [folderReview()] } });
     const board = await boardOf(harness);
     expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({
       stage: "code-review",
-      openReview: { targetKey: "br-0a1b2c3d4e5f6a7b", label: "Ready", state: "needs-review" },
+      openReview: { targetKey: "br-0a1b2c3d4e5f6a7b", id: "web-api:bb/env_thr_lead2", label: "Ready", state: "needs-review" },
     });
     expect(board.reviewsWaiting).toContainEqual(
       expect.objectContaining({ targetKey: "br-0a1b2c3d4e5f6a7b", ticketKey: "ABC-102", label: "Ready", threadId: "thr_elsewhere" }),
@@ -594,15 +673,16 @@ describe("review rounds", () => {
   });
 
   it("finds a review by the thread its comments went to", async () => {
-    const sends = [{ at: 8, threadId: "thr_impl1" }];
     const { harness } = await setup({
       world: {
-        round: { userArchivedAt: 1 },
+        round: ARCHIVED,
         reviews: [
           folderReview({
-            feature: null,
-            sends,
-            turn: { group: "waiting", reason: "fixes-sent", label: "2 of 6 reported" },
+            folder: null,
+            threadIds: ["thr_elsewhere", "thr_impl1"],
+            waitsOn: "agent",
+            waitsOnThreadId: "thr_impl1",
+            label: "2 of 6 reported",
           }),
         ],
       },
@@ -611,125 +691,6 @@ describe("review rounds", () => {
       stage: "building",
       openReview: { label: "2 of 6 reported", state: "with-agent" },
     });
-  });
-
-  it("does not read a folder review that became its own PR's as approved", async () => {
-    const { harness } = await setup({
-      world: {
-        reviews: [
-          folderReview({
-            kind: "pr",
-            ownPr: true,
-            turn: { group: "reviewed", reason: "own", label: "Your PR" },
-          }),
-        ],
-      },
-    });
-    const board = await boardOf(harness);
-    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "planning", openReview: null });
-    expect(board.reviewsWaiting.map((r) => r.ticketKey)).not.toContain("ABC-102");
-    expect((await detailOf(harness, "ABC-102")).reviews).toEqual([
-      expect.objectContaining({ targetKey: "br-0a1b2c3d4e5f6a7b", state: "idle", label: "Your PR" }),
-    ]);
-  });
-
-  it("does not hold a ticket in Code review for a review whose folder was removed", async () => {
-    const { harness } = await setup({
-      world: { reviews: [folderReview({ turn: { group: "needs", reason: "folder-gone", label: "Folder removed" } })] },
-    });
-    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "planning", openReview: null });
-    expect((await detailOf(harness, "ABC-102")).reviews).toEqual([
-      expect.objectContaining({ state: "idle", label: "Folder removed" }),
-    ]);
-  });
-
-  it("puts a round back in Code review once the agent reports its fixes ready", async () => {
-    const { harness } = await setup({
-      world: {
-        round: {
-          sends: [{ at: 10, threadId: "thr_lead1", readyAt: 12 }],
-          turn: { group: "needs", reason: "fixes-ready", label: "Ready to re-review" },
-        },
-      },
-    });
-    const board = await boardOf(harness);
-    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({
-      stage: "code-review",
-      openReview: { targetKey: "ref-1", label: "Ready to re-review", state: "needs-review" },
-    });
-    expect(board.reviewsWaiting).toEqual([
-      expect.objectContaining({ targetKey: "ref-1", ticketKey: "ABC-101", label: "Ready to re-review" }),
-    ]);
-  });
-
-  it("counts a Push the main thread is committing as with the agent", async () => {
-    const push = { at: 11 };
-    const { harness, world } = await setup({ world: { round: { push: { ...push, state: "committing" } } } });
-    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")).toMatchObject({
-      stage: "building",
-      openReview: { state: "with-agent", label: "Committing for Push" },
-    });
-
-    world.round = { push: { ...push, state: "pushing" } };
-    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: true });
-    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")!.openReview).toMatchObject({
-      state: "with-agent",
-      label: "Pushing",
-    });
-
-    // An approval sent to the thread before the Push doesn't hide it.
-    world.round = { approvalSent: { at: 9 }, push: { ...push, state: "committing" } };
-    await harness.behavior.callRpc("reviews.poll", null);
-    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")).toMatchObject({
-      stage: "building",
-      openReview: { state: "with-agent", label: "Committing for Push" },
-    });
-  });
-
-  it("counts comments out on a folder review that became its own PR's as with the agent, until they come back", async () => {
-    const send = { at: 10, threadId: "thr_lead2" };
-    const ownPr = (sends: unknown[], turn: Record<string, unknown> = { group: "needs", reason: "own", label: "Your PR", at: 7 }) =>
-      folderReview({ kind: "pr", ownPr: true, sends, fixes: { sent: 2, reported: 1 }, turn });
-    const { harness, world } = await setup({ world: { reviews: [ownPr([send])] } });
-    const abc102 = async () => (await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")!;
-    expect(await abc102()).toMatchObject({ stage: "building", openReview: { state: "with-agent", label: "1 of 2 reported" } });
-
-    // A teammate's comment after the Send is the user's turn, whatever is still out.
-    world.reviews = [ownPr([send], { group: "needs", reason: "new-comments", label: "Your PR · 1 new comment", at: 11 })];
-    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: true });
-    expect(await abc102()).toMatchObject({
-      stage: "code-review",
-      openReview: { state: "needs-review", label: "Your PR · 1 new comment" },
-    });
-
-    world.reviews = [ownPr([{ ...send, readyAt: 12 }], { group: "needs", reason: "fixes-ready", label: "Ready to re-review" })];
-    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: true });
-    expect(await abc102()).toMatchObject({ stage: "code-review", openReview: { state: "needs-review", label: "Ready to re-review" } });
-
-    // Its thread archived before reporting the rest: they're back with the user.
-    world.reviews = [ownPr([{ ...send, stopped: { why: "archived" } }])];
-    await harness.behavior.callRpc("reviews.poll", null);
-    expect(await abc102()).toMatchObject({ stage: "code-review", openReview: { state: "needs-review" } });
-  });
-
-  it("stops counting an approval sent to the thread once the folder moves past it", async () => {
-    const approved = (extra: Record<string, unknown> = {}) =>
-      folderReview({ approvalSent: { at: 9 }, ...extra });
-    const { harness, world } = await setup({ world: { reviews: [approved()] } });
-    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "planning", openReview: null });
-    expect((await detailOf(harness, "ABC-102")).reviews).toEqual([expect.objectContaining({ state: "approved", label: "Approved" })]);
-
-    for (const moved of [
-      { feature: { environmentId: "env_thr_lead2", branch: "bb/env_thr_lead2", changedFiles: 3 } },
-      { status: "generating", turn: { group: "needs", reason: "new", label: "Generating" } },
-    ]) {
-      world.reviews = [approved(moved)];
-      await harness.behavior.callRpc("reviews.poll", null);
-      expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")).toMatchObject({
-        stage: "code-review",
-        openReview: { state: "needs-review" },
-      });
-    }
   });
 
   it("gives a folder review that several tickets share only to the ticket its branch names", async () => {
@@ -743,15 +704,15 @@ describe("review rounds", () => {
     ]);
     expect(board.reviewsWaiting.map((r) => r.targetKey)).not.toContain("br-0a1b2c3d4e5f6a7b");
 
-    world.reviews = [folderReview({ feature: { environmentId: "env_thr_lead2", branch: "bb/abc-103-thumbs" } })];
-    await harness.behavior.callRpc("reviews.poll", null);
+    world.reviews = [folderReview({ branch: "bb/abc-103-thumbs" })];
+    await poll(harness);
     board = await boardOf(harness);
     expect(board.reviewsWaiting).toContainEqual(expect.objectContaining({ targetKey: "br-0a1b2c3d4e5f6a7b", ticketKey: "ABC-103" }));
   });
 
   it("matches a folder review by checkout only on the ticket's branch or one naming it", async () => {
     const onBranch = (targetKey: string, environmentId: string, branch: string) =>
-      folderReview({ targetKey, gitRef: branch, mainThread: null, feature: { environmentId, branch } });
+      folderReview({ targetKey, branch, folder: { environmentId }, mainThreadId: null, threadIds: [] });
     const shared = { environmentId: "env_shared" };
     const { harness } = await setup({
       world: {
@@ -762,7 +723,7 @@ describe("review rounds", () => {
             thread("thr_lead3", ORCH, "ABC-103 thumbnails"),
           ],
         },
-        round: { userArchivedAt: 1 },
+        round: ARCHIVED,
         reviews: [
           onBranch("br-shared-other", "env_shared", "fix-typo"),
           onBranch("br-shared-named", "env_shared", "abc-102-image-sizes"),
@@ -776,59 +737,18 @@ describe("review rounds", () => {
     expect(board.tickets.find((t) => t.key === "ABC-103")!.openReview).toBeNull();
   });
 
-  it("puts an own PR approved in its thread back in Code review when a teammate comments", async () => {
-    const approved = folderReview({
-      kind: "pr",
-      ownPr: true,
-      approvalSent: { at: 9 },
-      turn: { group: "needs", reason: "own", label: "Your PR", at: 7 },
-    });
-    const { harness, world } = await setup({ world: { reviews: [approved] } });
-    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")!.openReview).toBeNull();
-
-    world.reviews = [{ ...approved, turn: { group: "needs", reason: "new-comments", label: "Your PR · 2 new comments", at: 12 } }];
-    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: true });
-    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")).toMatchObject({
-      stage: "code-review",
-      openReview: { label: "Your PR · 2 new comments", state: "needs-review" },
-    });
-  });
-
-  it("keeps a ticket PR waiting on its author in Building until the agent reports after the review", async () => {
-    const { harness } = await setup({
-      world: {
-        round: { userArchivedAt: 1 },
-        reviews: [
-          {
-            targetKey: "pr-9f8e7d6c5b4a3f2e-77",
-            kind: "pr",
-            ownPr: false,
-            sourceThreadId: "thr_lead1",
-            createdAt: 8,
-            turn: { group: "waiting", reason: "waiting", label: "Changes requested", at: Date.now() - 1000 },
-          },
-        ],
-      },
-    });
-    const ticket = async () => (await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")!;
-    expect(await ticket()).toMatchObject({ stage: "building", openReview: { label: "Changes requested", state: "with-agent" } });
-
-    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "in-review" }, { threadId: "thr_lead1" });
-    expect((await ticket()).stage).toBe("in-review");
-  });
-
   it("assigns a stacked PR's review by its head, not the base that names the ticket below", async () => {
     const { harness } = await setup({
       world: {
-        round: { userArchivedAt: 1 },
+        round: ARCHIVED,
         reviews: [
-          folderReview({
+          crwReview({
             targetKey: "pr-acme-web-api-52",
-            kind: "pr",
-            gitRef: "abc-101-avatars...abc-102-sizes",
-            feature: null,
-            mainThread: { threadId: "thr_lead1" },
-            sends: [{ at: 3, threadId: "thr_lead2" }],
+            id: "web-api#52",
+            pr: { repo: "acme/web-api", number: 52, url: "https://github.com/acme/web-api/pull/52", author: "sam" },
+            branch: "abc-102-sizes",
+            mainThreadId: "thr_lead1",
+            threadIds: ["thr_lead1", "thr_lead2"],
           }),
         ],
       },
@@ -838,41 +758,32 @@ describe("review rounds", () => {
     ]);
   });
 
-  it("leaves out a review merged into another, and odd rows", async () => {
+  it("leaves out a review merged into another", async () => {
     const { harness } = await setup({
       world: {
         reviews: [
           folderReview({
             targetKey: "br-merged",
-            sourceThreadId: "thr_lead1",
-            mainThread: null,
-            feature: null,
-            archivedAt: 8,
+            folder: null,
+            mainThreadId: null,
+            threadIds: ["thr_lead1"],
+            waitsOn: "nobody",
+            archived: true,
             mergedInto: "ref-1",
-            turn: { group: "archive", reason: "merged-into", label: "Merged into another review" },
+            label: "Merged into another review",
           }),
-          { targetKey: "br-odd", sourceThreadId: "thr_lead2", turn: "soon", sends: 7, feature: [], createdAt: "now" },
-          null,
         ],
       },
     });
     expect((await detailOf(harness, "ABC-101")).reviews.map((r) => r.targetKey)).toEqual(["ref-1", "ref-3"]);
-    expect((await detailOf(harness, "ABC-102")).reviews).toEqual([
-      expect.objectContaining({ targetKey: "br-odd", state: "idle", label: null }),
-    ]);
-    expect((await boardOf(harness)).sweepError).toBeNull();
   });
 
   it("assigns a review to the ticket its branch names, not one whose key is a prefix of it", async () => {
     const { harness } = await setup({
       world: {
-        round: { userArchivedAt: 1 },
+        round: ARCHIVED,
         reviews: [
-          folderReview({
-            gitRef: "bb/abc-101-avatars",
-            feature: { environmentId: "env_thr_lead1", branch: "bb/abc-101-avatars" },
-            mainThread: null,
-          }),
+          folderReview({ branch: "bb/abc-101-avatars", folder: { environmentId: "env_thr_lead1" }, mainThreadId: null, threadIds: [] }),
         ],
       },
     });
@@ -887,7 +798,7 @@ describe("review rounds", () => {
   it("starts the folder review from the ticket's lead thread and shows it without waiting for a poll", async () => {
     const { harness, world } = await setup();
     world.startReview = () => {
-      world.reviews.push(folderReview({ targetKey: "br-started", mainThread: { threadId: "thr_lead2" }, sourceThreadId: "thr_lead2" }));
+      world.reviews.push(folderReview({ targetKey: "br-started", mainThreadId: "thr_lead2", threadIds: ["thr_lead2"] }));
       return { ok: true, targetKey: "br-started" };
     };
     expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")!.openReview).toBeNull();
@@ -899,14 +810,6 @@ describe("review rounds", () => {
     const board = await boardOf(harness);
     expect(board.tickets.find((t) => t.key === "ABC-102")!.openReview).toMatchObject({ targetKey: "br-started" });
     expect(board.reviewsWaiting).toContainEqual(expect.objectContaining({ targetKey: "br-started", ticketKey: "ABC-102" }));
-  });
-
-  it("refuses to start a review without Code Review Workspace 1.8, and does not call it", async () => {
-    for (const options of [{ peers: ["linear"] }, { peerVersions: { "code-review-workspace": "1.7.2" } }]) {
-      const { harness, world } = await setup(options);
-      await expect(startReview(harness, "ABC-101")).rejects.toThrow("Code Review Workspace 1.8 or newer is not running");
-      expect(world.started).toEqual([]);
-    }
   });
 
   it("refuses a ticket with no folder or none on the board, and does not call Code Review Workspace", async () => {
@@ -940,14 +843,75 @@ describe("review rounds", () => {
     await expect(startReview(harness, "ABC-101")).rejects.toThrow("Couldn't reach Code Review Workspace");
   });
 
-  it("shows no review data when Code Review Workspace fails", async () => {
-    const { harness } = await setup({ world: { reviewsFail: true } });
+  const cases: [string, Parameters<typeof setup>[0], boolean][] = [
+    ["missing", { peers: ["linear"] }, false],
+    ["disabled", { world: { status: notRunning } }, false],
+    ["older than 1.10", { world: { status: notYet } }, false],
+    ["failing", { world: { status: () => { throw rpcError(500, "handler_error", "database is locked"); } } }, true],
+    ["answering without a list", { world: { status: () => ({ reviews: "soon" }) } }, true],
+    ["answering a list with an odd review", { world: { reviews: [{ targetKey: "br-odd", waitsOn: "everyone" }] } }, true],
+  ];
+  it.each(cases)("works as without Code Review Workspace when it is %s", async (_, options, logged) => {
+    const { harness, world } = await setup({ ...options, board: { rules: { codeReviewRounds: true } } });
     const board = await boardOf(harness);
-    expect(board.integrations.codeReview).toBe(true);
+    expect(board.integrations).toEqual({ linear: true, codeReview: false });
     expect(board.sweepError).toBeNull();
     expect(board.reviewsWaiting).toEqual([]);
-    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "planning", openReview: null });
+    expect(board.tickets.map((t) => [t.key, t.stage, t.openReview])).toEqual([
+      ["ABC-101", "planning", null],
+      ["ABC-102", "planning", null],
+    ]);
     expect((await detailOf(harness, "ABC-101")).reviews).toEqual([]);
+    expect((await leadConfig(harness)).instructions).not.toContain("bb review");
+    await expect(startReview(harness, "ABC-101")).rejects.toThrow("Code Review Workspace 1.10 or newer is not running");
+    expect(world.started).toEqual([]);
+    expect(harness.logEntries.some((entry) => entry.message.includes("reviews.v1.status"))).toBe(logged);
+  });
+
+  it("asks again on the next poll when Code Review Workspace answers unknown_method while it starts", async () => {
+    const { harness, world } = await setup({ world: { status: notYet }, board: { rules: { codeReviewRounds: true } } });
+    expect((await boardOf(harness)).integrations.codeReview).toBe(false);
+
+    world.status = null;
+    const signals = harness.realtimeSignals.length;
+    expect(await poll(harness)).toEqual({ changed: true });
+    expect(harness.realtimeSignals.length).toBeGreaterThan(signals);
+    let board = await boardOf(harness);
+    expect(board.integrations.codeReview).toBe(true);
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "code-review", openReview: { targetKey: "ref-1" } });
+    expect((await leadConfig(harness)).instructions).toContain("bb review");
+
+    // Not answering for a moment later hides it only until a poll gets an answer again.
+    world.status = notYet;
+    await poll(harness);
+    board = await boardOf(harness);
+    expect(board.integrations.codeReview).toBe(false);
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "planning", openReview: null });
+    world.status = null;
+    await poll(harness);
+    expect((await boardOf(harness)).integrations.codeReview).toBe(true);
+  });
+
+  it("tells open pages when Code Review Workspace starts or stops answering, though no round moved", async () => {
+    const { harness, world } = await setup({ world: { round: ARCHIVED, status: notYet } });
+    for (const [status, codeReview] of [[null, true], [notYet, false]] as const) {
+      world.status = status;
+      const signals = harness.realtimeSignals.length;
+      expect(await poll(harness)).toEqual({ changed: false });
+      expect(harness.realtimeSignals.length).toBeGreaterThan(signals);
+      expect((await boardOf(harness)).integrations.codeReview).toBe(codeReview);
+    }
+  });
+
+  it("hides every review state as soon as any read finds Code Review Workspace missing", async () => {
+    const { harness, world } = await setup();
+    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")!.stage).toBe("code-review");
+    world.status = notRunning;
+    expect((await detailOf(harness, "ABC-101")).reviews).toEqual([]);
+    const board = await boardOf(harness);
+    expect(board.integrations.codeReview).toBe(false);
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "planning", openReview: null });
+    expect(board.reviewsWaiting).toEqual([]);
   });
 });
 
@@ -960,7 +924,7 @@ describe("plan review", () => {
     ((await harness.behavior.callRpc("plans.list", { boardId: 1, key: "ABC-101" })) as { rounds: PlanRound[] }).rounds;
 
   // The default fixture has a code review round open on this lead, which would outrank plan review.
-  const noReview = { world: { round: { userArchivedAt: 1 } } };
+  const noReview = { world: { round: ARCHIVED } };
 
   it("opens a round from the agent's plan file and puts it in front of the user", async () => {
     const { harness, world } = await setup(noReview);
@@ -1179,7 +1143,7 @@ describe("agent configuration", () => {
     expect(config.instructions).toContain("Rules Sam set for this board (board configuration, quoted):\n> Never deploy.\n> Ask before merging.");
   });
 
-  it("tells agents the Code Review Workspace folder-review loop only from 1.8.0", async () => {
+  it("tells agents the Code Review Workspace folder-review loop only while it answers its review status", async () => {
     const lead = { thread: { id: "thr_lead1" }, pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "lead" } };
     const board = { userName: "Sam", rules: { codeReviewRounds: true } };
 
@@ -1196,7 +1160,7 @@ describe("agent configuration", () => {
     );
     expect(on.instructions).toContain("Act only on what Sam sends back from the review.");
 
-    const old = await resolve((await setup({ board, peerVersions: { "code-review-workspace": "1.7.9" } })).harness, lead);
+    const old = await resolve((await setup({ board, world: { status: notYet } })).harness, lead);
     expect(old.instructions).not.toContain("bb review");
     const missing = await resolve((await setup({ board, peers: ["linear"] })).harness, lead);
     expect(missing.instructions).not.toContain("bb review");

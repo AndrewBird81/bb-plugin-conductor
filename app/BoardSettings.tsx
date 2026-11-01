@@ -115,7 +115,7 @@ export function BoardSettings({ boardId }: { boardId: number }) {
               <span>
                 <span className="font-medium">{rule.title}</span>
                 <span className="block text-muted-foreground">
-                  {unavailable ? "Needs the Code Review Workspace plugin, version 1.8 or newer." : rule.summary}
+                  {unavailable ? "Needs the Code Review Workspace plugin, version 1.10 or newer." : rule.summary}
                 </span>
               </span>
             </label>

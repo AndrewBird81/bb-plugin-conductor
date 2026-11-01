@@ -62,7 +62,7 @@ export function BoardPage({ subPath }: PluginNavPanelProps) {
   const route = parseRoute(subPath);
   const boards = useBoards();
   const list = boards.data?.boards;
-  useReviewPolling(boards.data?.integrations.codeReview ?? false);
+  useReviewPolling();
   const boardId = routeBoardId(route, list);
 
   let body: ReactNode;
@@ -230,7 +230,7 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
                     className="font-mono text-xs hover:underline"
                     href={`/plugins/code-review-workspace/review/${encodeURIComponent(r.targetKey)}`}
                   >
-                    {r.gitRef ?? r.targetKey}
+                    {r.id}
                   </a>
                   <span className="text-muted-foreground">{r.label ?? REVIEW_STATE_LABELS[r.state]}</span>
                   {r.createdAt && (

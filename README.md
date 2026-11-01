@@ -68,13 +68,14 @@ update can break parts of it; each surface fails on its own.
 | Plugin | Adds |
 | --- | --- |
 | [Linear](https://github.com/vburojevic/bb-plugin-linear) | Ticket keys from issue bindings, issue state, description and relations |
-| Code Review Workspace 1.8 or newer | Reviews of each ticket's folder and threads with their status; Code review stage; **Review changes** on the ticket page |
+| Code Review Workspace 1.10 or newer | Reviews of each ticket's folder and threads with their status; Code review stage; **Review changes** on the ticket page |
 | GitHub PR Status (bundled) | The PR of each ticket's branch |
 
-Without them the board works from thread titles and what agents report. An
-older Code Review Workspace counts as missing.
+Without them the board works from thread titles and what agents report.
+Code Review Workspace counts as missing while it doesn't answer its review
+status, as when it's older than 1.10, disabled or starting.
 
-A review belongs to a ticket when it is of the ticket's folder or comes from
+A review belongs to a ticket when it is of the ticket's folder or linked to
 one of its threads. Cards and the ticket page show Code Review Workspace's own
 status, such as "Ready to re-review" or "2 of 6 reported". In the Reviews
 section of a ticket's page, **Open review** goes to the ticket's live review;
@@ -88,10 +89,10 @@ The first rule that matches wins:
 1. **Paused** when an agent reports it.
 2. **Code review** while a Code Review Workspace review of the ticket's
    folder or threads waits on you; **Building** while your comments or a Push
-   are with the agent, until the agent reports again. A review that waits on
-   someone else (the PR's author, a draft, a snooze, a paused folder) or is of
-   a removed folder doesn't hold the stage. Approved and archived reviews are
-   finished, and one merged into another is dropped.
+   are with the agent, or a PR not under your login waits on its author, until
+   the agent reports again. A review that waits on nobody (a draft, a snooze, a
+   folder on another branch or removed) doesn't hold the stage. Approved and
+   archived reviews are finished, and one merged into another is dropped.
 3. **In review** when a PR is open for review; **In milestone** when all PRs
    are merged.
 4. The stage the agent **reported**, if any.

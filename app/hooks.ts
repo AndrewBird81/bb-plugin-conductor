@@ -202,13 +202,14 @@ const REVIEW_POLL_MS = 5_000;
 
 /**
  * Code Review Workspace's change signals reach only its own pages, so the
- * board asks the server to re-read rounds every few seconds while visible.
- * The server publishes a change only when a round moved.
+ * board asks the server to re-read rounds every few seconds while visible,
+ * whether or not Code Review Workspace answered last time: it may be starting.
+ * The server publishes a change only when a round moved, or when Code Review
+ * Workspace starts or stops answering.
  */
-export function useReviewPolling(enabled: boolean) {
+export function useReviewPolling() {
   const rpc = useRpc<typeof rpcContract>();
   useEffect(() => {
-    if (!enabled) return;
     const poll = () => {
       if (document.visibilityState === "visible") void rpc.call("reviews.poll", null).catch(() => {});
     };
@@ -218,5 +219,5 @@ export function useReviewPolling(enabled: boolean) {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [rpc, enabled]);
+  }, [rpc]);
 }

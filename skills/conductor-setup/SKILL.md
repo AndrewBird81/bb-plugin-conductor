@@ -50,7 +50,7 @@ with a diff against the round before.
 ## Optional plugins
 
 - **Linear**: issue titles, state, description and relations.
-- **Code Review Workspace** (1.8 or newer; older counts as missing): reviews
+- **Code Review Workspace** (1.10 or newer; older counts as missing): reviews
   of each ticket's folder and threads waiting on you, and **Review changes**
   on the ticket page.
 - **GitHub PR Status** (bundled): the PR of each ticket's branch.

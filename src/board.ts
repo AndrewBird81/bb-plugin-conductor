@@ -19,7 +19,7 @@ import {
 } from "./contract";
 import { discoverTickets } from "./discovery";
 import { compileRegex, DEFAULT_TICKET_PATTERN, milestoneFor, type BoardOptions } from "./options";
-import { codeReviews, linearIssue, linearResolve, startCodeReview, type LinkedReview } from "./peers";
+import { linearIssue, linearResolve, startCodeReview, type LinkedReview } from "./peers";
 import { checkPlanPath, PLAN_MAX_BYTES } from "./plans";
 import { decideStage } from "./stages";
 import type { BoardStore, NewDecision } from "./store";
@@ -68,6 +68,8 @@ export class BoardEngine {
     private readonly bb: BbPluginApi,
     readonly store: BoardStore,
     private readonly integrations: () => Integrations,
+    /** Code Review Workspace's reviews; a read without a valid answer turns its integration off. */
+    private readonly codeReviews: () => Promise<LinkedReview[]>,
     private readonly onChange: () => void,
   ) {}
 
@@ -137,8 +139,7 @@ export class BoardEngine {
    * reads and reports refresh them instead of waiting for the next sweep.
    */
   private async refreshReviews(): Promise<boolean> {
-    const reviews =
-      this.integrations().codeReview && this.store.listTickets().length > 0 ? await codeReviews(this.bb) : [];
+    const reviews = await this.codeReviews();
     // Archived or approved rounds no longer wait on the user.
     const before = this.reviewKey();
     this.facts.reviews = this.assignReviews(
@@ -162,12 +163,17 @@ export class BoardEngine {
     if (Date.now() - this.reviewsReadAt > maxAgeMs) await this.refreshReviews();
   }
 
+  /** Rounds waiting on the user or the agent; none while Code Review Workspace counts as missing. */
+  private waitingReviews(): WaitingReview[] {
+    return this.integrations().codeReview ? this.facts.reviews : [];
+  }
+
   /**
    * Assigns each review to one ticket, from its threads' tickets when it has
    * any, else the tickets whose checkout is its folder, on their branch or one
    * naming them; leads sharing a checkout share its branch, so of several there
    * only the ones its branch names. Of several, the ticket its branch names,
-   * then its head's, then its ref's, then the one on its branch, then the first.
+   * then the one on its branch, then the first.
    */
   private assignReviews(reviews: LinkedReview[]): WaitingReview[] {
     const tickets = this.store.listTickets();
@@ -184,12 +190,9 @@ export class BoardEngine {
       const fromFolder = inFolder.length > 1 ? inFolder.filter((t) => namesKey(branch, t.key)) : inFolder;
       const candidates = linked.length > 0 ? linked : fromFolder;
       if (candidates.length === 0) return [];
-      // A stacked PR's ref is base...head, and its base names the ticket below.
-      const head = review.gitRef?.split("...").at(-1) ?? null;
+      // A PR's branch is its head, so a stacked PR goes by its own branch, not the base naming the ticket below.
       const ticket =
         candidates.find((t) => namesKey(branch, t.key)) ??
-        candidates.find((t) => namesKey(head, t.key)) ??
-        candidates.find((t) => namesKey(review.gitRef, t.key)) ??
         candidates.find((t) => branch && t.branch === branch) ??
         candidates[0]!;
       return [{ ...review, ticketKey: ticket.key }];
@@ -334,7 +337,7 @@ export class BoardEngine {
     const plan = ticket.planRound;
     const planRound = plan && ["open", "approved", "changes_requested"].includes(plan.status) ? plan.status : null;
     // A round waiting on the user outranks one already with the agent.
-    const rounds = this.facts.reviews.filter((r) => r.ticketKey === ticket.key);
+    const rounds = this.waitingReviews().filter((r) => r.ticketKey === ticket.key);
     const review = rounds.find((r) => r.state === "needs-review") ?? rounds[0] ?? null;
     const running = [ticket.leadThreadId, ...ticket.implementerThreadIds].some((id) =>
       isRunning(this.facts.statuses.get(id)),
@@ -343,7 +346,7 @@ export class BoardEngine {
       reported: ticket.reportedStage,
       prs: ticket.prs,
       reviewRound: review ? (review.state as "needs-review" | "with-agent") : null,
-      reportedAfterReview: (ticket.reportedAt ?? 0) > (review?.sentAt ?? Infinity),
+      reportedAfterReview: (ticket.reportedAt ?? 0) > (review?.since ?? Infinity),
       planRound: planRound as "open" | "approved" | "changes_requested" | null,
       agentRunning: running,
     });
@@ -355,7 +358,7 @@ export class BoardEngine {
       openReview: review
         ? {
             targetKey: review.targetKey,
-            gitRef: review.gitRef,
+            id: review.id,
             label: review.label,
             state: review.state as "needs-review" | "with-agent",
           }
@@ -382,7 +385,7 @@ export class BoardEngine {
       board: this.summary(),
       integrations: this.integrations(),
       tickets,
-      reviewsWaiting: this.facts.reviews.filter((r) => r.state === "needs-review"),
+      reviewsWaiting: this.waitingReviews().filter((r) => r.state === "needs-review"),
       plansWaiting: this.store.root.waitingRounds(this.boardId),
       nextPr: record.options.rules.onePrAtATime ? nextPrToOpen(tickets) : null,
       lastSweepAt: record.lastSweepAt,
@@ -396,7 +399,7 @@ export class BoardEngine {
     const issueId = this.store.linearIssueId(key);
     const [linear, reviews] = await Promise.all([
       issueId && this.integrations().linear ? linearIssue(this.bb, issueId) : Promise.resolve(null),
-      this.integrations().codeReview ? codeReviews(this.bb) : Promise.resolve([]),
+      this.codeReviews(),
     ]);
     return {
       ticket: this.withStage(stored),
@@ -414,7 +417,7 @@ export class BoardEngine {
    * as `bb review` in its lead thread would, then re-reads the reviews.
    */
   async startReview(key: string): Promise<{ targetKey: string }> {
-    if (!this.integrations().codeReview) throw new Error("Code Review Workspace 1.8 or newer is not running.");
+    if (!this.integrations().codeReview) throw new Error("Code Review Workspace 1.10 or newer is not running.");
     const ticket = this.store.getTicket(key);
     if (!ticket) throw new Error(`No ticket ${key} on the board.`);
     if (!ticket.environmentId) throw new Error(`${key}'s lead thread has no folder to review.`);

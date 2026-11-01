@@ -15,25 +15,12 @@ import {
 } from "./contract";
 import { deliver } from "./decisions";
 import { applyOptionsPatch, boardOptionsSchema, DEFAULT_TICKET_PATTERN, type BoardOptionsPatch } from "./options";
+import { codeReviews, type LinkedReview } from "./peers";
 import { planDiff, planFeedbackMessage } from "./plans";
 import type { NewDecision, Store, TableName } from "./store";
 
 /** Plugin ids of the optional peers the board reads from. */
-const PEERS = { linear: "linear", codeReview: "code-review-workspace" } as const;
-
-/** Code Review Workspace's folder reviews and report loop arrived in 1.8.0. */
-const CODE_REVIEW_MIN_VERSION = [1, 8, 0] as const;
-
-/** Whether a `major.minor.patch` version is at least `min`; anything unparsable is not. */
-function versionAtLeast(version: string, min: readonly number[]): boolean {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
-  if (!match) return false;
-  for (let i = 0; i < min.length; i++) {
-    const part = Number(match[i + 1]);
-    if (part !== min[i]) return part > min[i]!;
-  }
-  return true;
-}
+const PEERS = { linear: "linear" } as const;
 
 const exportSchema = z.object({
   settings: z.record(z.string(), z.string()),
@@ -76,27 +63,47 @@ export class Conductor {
     return this.integrations;
   }
 
-  /** Which optional plugins are running, Code Review Workspace only from 1.8.0; read once per sweep. */
+  /**
+   * Which optional plugins this bb has: Linear when it's running, read once
+   * per sweep, and Code Review Workspace when it answers its review status,
+   * which every read of its reviews asks again.
+   */
   async refreshIntegrations(): Promise<Integrations> {
     try {
       const { plugins } = await this.bb.sdk.plugins.list();
-      const running = (id: string) => plugins.find((p) => p.id === id && p.enabled && p.status === "running");
-      const codeReview = running(PEERS.codeReview);
-      this.integrations = {
-        linear: running(PEERS.linear) !== undefined,
-        codeReview: codeReview !== undefined && versionAtLeast(codeReview.version ?? "", CODE_REVIEW_MIN_VERSION),
-      };
+      const running = (id: string) => plugins.some((p) => p.id === id && p.enabled && p.status === "running");
+      this.integrations = { ...this.integrations, linear: running(PEERS.linear) };
     } catch (error) {
       this.bb.log.warn(`plugins.list: ${String(error)}`);
     }
+    await this.codeReviews();
     return this.integrations;
+  }
+
+  /**
+   * Code Review Workspace's reviews. Without a valid answer, as while it
+   * starts, it counts as missing until a later read gets one.
+   */
+  async codeReviews(): Promise<LinkedReview[]> {
+    const reviews = await codeReviews(this.bb);
+    if ((reviews !== null) !== this.integrations.codeReview) {
+      this.integrations = { ...this.integrations, codeReview: reviews !== null };
+      this.changed();
+    }
+    return reviews ?? [];
   }
 
   engine(boardId: number): BoardEngine {
     let engine = this.engines.get(boardId);
     if (!engine) {
       if (!this.store.getBoard(boardId)) throw new Error(`No board ${boardId}.`);
-      engine = new BoardEngine(this.bb, this.store.board(boardId), () => this.integrations, () => this.changed());
+      engine = new BoardEngine(
+        this.bb,
+        this.store.board(boardId),
+        () => this.integrations,
+        () => this.codeReviews(),
+        () => this.changed(),
+      );
       this.engines.set(boardId, engine);
     }
     return engine;
