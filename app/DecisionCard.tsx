@@ -43,7 +43,7 @@ export function DecisionCard({
         <div className="flex min-h-6 min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
           <span className="font-mono">{decision.ref}</span>
           {showTicket && (
-            <TicketLink boardId={decision.boardId} ticketKey={decision.ticketKey} className="font-mono text-foreground" />
+            <TicketLink boardId={decision.boardId} ticketKey={decision.ticketKey} className="text-foreground" />
           )}
           {decision.status === "open" && decision.blocking && (
             <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-700 dark:text-amber-300">blocking</span>

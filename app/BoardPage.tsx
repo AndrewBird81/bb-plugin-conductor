@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { rpcContract, type Review, type Ticket, type TicketDetail } from "../src/contract";
 import { useOpenAgentThread, useOrchestratorTabOnFirstVisit } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
+import { TEXT_LINK } from "./TicketLink";
 import { Overview } from "./Overview";
 import { BoardSettings } from "./BoardSettings";
 import {
@@ -180,13 +181,19 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
               Round {ticket.planRound.n}: {ticket.planRound.status.replace("_", " ")}
               {ticket.planRound.marks > 0 ? `, ${ticket.planRound.marks} marks` : ""}
             </span>
-            <button
-              type="button"
-              className="font-medium hover:underline"
-              onClick={() => go.plan(boardId, ticket.key, ticket.planRound!.n)}
-            >
-              {ticket.planRound.status === "open" ? "Review plan" : "Open plan"}
-            </button>
+            {ticket.planRound.status === "open" ? (
+              <Button size="sm" onClick={() => go.plan(boardId, ticket.key, ticket.planRound!.n)}>
+                Review plan
+              </Button>
+            ) : (
+              <button
+                type="button"
+                className={cn(TEXT_LINK, "font-medium")}
+                onClick={() => go.plan(boardId, ticket.key, ticket.planRound!.n)}
+              >
+                Open plan
+              </button>
+            )}
           </p>
         </Section>
       )}
