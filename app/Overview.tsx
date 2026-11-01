@@ -1,6 +1,7 @@
-import { useState, type ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { UrlLink, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
+import { CONTROL_HOVER_TRANSITION } from "@/components/ui/motion";
 import { cn } from "@/lib/utils";
 import { STAGES, type Board, type Decision, type PlanRound, type PullRequest, type Stage, type Ticket } from "../src/contract";
 import { useOpenAgentThread, useOpenOrchestratorTab } from "./AgentTabs";
@@ -356,37 +357,48 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
       role: ticket.implementerThreadIds.length > 1 ? `Implementer ${i + 1}` : "Implementer",
     })),
   ];
+  const open = () => openTicket(ticket.boardId, ticket.key);
+  // A click anywhere on the card opens the ticket, for the mouse; the header button is the way in for
+  // the keyboard. Inner controls do their own thing, and a drag that selected text is not a click.
+  const openFromCard = (e: MouseEvent<HTMLElement>) => {
+    if ((e.target as Element).closest("a, button, input, textarea, select, label")) return;
+    if (window.getSelection()?.isCollapsed === false) return;
+    open();
+  };
   return (
     <article
+      onClick={openFromCard}
       className={cn(
-        "grid gap-2.5 rounded-xl border border-border bg-card px-3.5 py-3",
+        "group grid cursor-pointer gap-2.5 rounded-xl border border-border bg-card px-3.5 py-3 hover:bg-muted",
+        CONTROL_HOVER_TRANSITION,
         paused && "border-dashed",
         ticket.openDecisions > 0 && "border-[var(--brand,var(--attention))]",
       )}
     >
-      <div className="grid gap-0.5">
-        <div className="flex items-baseline gap-2">
-          <button
-            type="button"
-            className="text-[15px] font-bold tracking-tight hover:underline"
-            onClick={() => openTicket(ticket.boardId, ticket.key)}
-          >
+      {/* The spaces between spans only space out the button's accessible name; flex and grid drop them. */}
+      <button
+        type="button"
+        className="-m-1 grid cursor-pointer gap-0.5 rounded-md p-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={open}
+      >
+        <span className="flex w-full items-baseline gap-2">
+          <span className="text-[15px] font-bold tracking-tight underline decoration-muted-foreground underline-offset-[3px] group-hover:decoration-foreground">
             {ticket.key}
-          </button>
+          </span>{" "}
           {ticket.milestone && (
             <span className="rounded-full border border-border px-1.5 text-[11px] font-semibold text-muted-foreground">
               {ticket.milestone}
             </span>
-          )}
+          )}{" "}
           {ticket.openDecisions > 0 && (
             <span className="text-xs font-medium text-[var(--brand,var(--attention))]">
               {ticket.openDecisions} decision{ticket.openDecisions > 1 ? "s" : ""}
             </span>
-          )}
+          )}{" "}
           <span className="ml-auto truncate text-xs text-muted-foreground">{ticket.repo}</span>
-        </div>
-        <p className="text-[13.5px]">{shortTitle(ticket.title)}</p>
-      </div>
+        </span>{" "}
+        <span className="text-[13.5px]">{shortTitle(ticket.title)}</span>
+      </button>
       {ticket.prs.length > 0 && <PrStack prs={ticket.prs} />}
       <CardNote ticket={ticket} />
       {ticket.sharedWith.length > 0 && (
@@ -400,7 +412,7 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
               <Dot presence={p} />
               <button
                 type="button"
-                className="text-foreground hover:underline"
+                className="cursor-pointer text-foreground hover:underline"
                 onClick={() => openAgent(agent.id, `${ticket.key} ${agent.role.toLowerCase()}`)}
               >
                 {agent.role}
@@ -424,7 +436,7 @@ function PlanNote({ boardId, ticketKey, round }: { boardId: number; ticketKey: s
           ? `Plan round ${round.n} waits on you${round.marks > 0 ? `, ${round.marks} mark${round.marks > 1 ? "s" : ""} drafted` : ""}.`
           : `Changes requested on plan round ${round.n}; the agent is revising.`}
       </span>
-      <button type="button" className="font-medium hover:underline" onClick={() => go.plan(boardId, ticketKey, round.n)}>
+      <button type="button" className="cursor-pointer font-medium hover:underline" onClick={() => go.plan(boardId, ticketKey, round.n)}>
         {open ? "Review plan" : "See round"}
       </button>
     </p>

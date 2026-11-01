@@ -250,6 +250,46 @@ describe("board page", () => {
     );
   });
 
+  it("opens a ticket's page from its card, by its header button or a click elsewhere on it", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: rpc() });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Accept avatar uploads on sign-up");
+    const ticketPage = { method: "toPluginPanel", options: { subPath: "1/ABC-101" } };
+    const calls = slot.inspection.navigateCalls;
+
+    fireEvent.click(slot.getByRole("button", { name: "ABC-101 M4 1 decision accounts-api Accept avatar uploads on sign-up" }));
+    expect(calls).toHaveLength(1);
+    expect(calls.at(-1)).toMatchObject(ticketPage);
+
+    const shared = slot.getByText("Same agents as ABC-103.");
+    fireEvent.click(shared);
+    expect(calls).toHaveLength(2);
+    expect(calls.at(-1)).toMatchObject(ticketPage);
+
+    // A drag that selected text ends in a click too; it should not leave the board.
+    window.getSelection()!.selectAllChildren(shared);
+    fireEvent.click(shared);
+    window.getSelection()!.removeAllRanges();
+    expect(calls).toHaveLength(2);
+  });
+
+  it("opens an agent from its card's agent button without opening the ticket", async () => {
+    const opened: unknown[] = [];
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, {
+      rpc: rpc(),
+      experimental_openTab: (call) => {
+        opened.push(call);
+        return true;
+      },
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Accept avatar uploads on sign-up");
+
+    fireEvent.click(within(slot.getByRole("region", { name: "Plan review" })).getByRole("button", { name: "Lead" }));
+    expect(opened.at(-1)).toMatchObject({ tab: { id: "agent" }, params: { threadId: "thr_lead1" } });
+    expect(slot.inspection.navigateCalls).toEqual([]);
+  });
+
   it("sends a custom answer typed under Other", async () => {
     const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: rpc() });
     cleanup = () => slot.lifecycle.unmount();
