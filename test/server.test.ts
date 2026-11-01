@@ -741,6 +741,74 @@ describe("review rounds", () => {
     expect(board.reviewsWaiting).toContainEqual(expect.objectContaining({ targetKey: "br-0a1b2c3d4e5f6a7b", ticketKey: "ABC-103" }));
   });
 
+  it("matches a folder review by checkout only on the ticket's branch or one naming it", async () => {
+    const onBranch = (targetKey: string, environmentId: string, branch: string) =>
+      folderReview({ targetKey, gitRef: branch, mainThread: null, feature: { environmentId, branch } });
+    const shared = { environmentId: "env_shared" };
+    const { harness } = await setup({
+      world: {
+        children: {
+          [ORCH]: [
+            thread("thr_lead1", ORCH, "ABC-101 avatar uploads", shared),
+            thread("thr_lead2", ORCH, "ABC-102 image sizes", shared),
+            thread("thr_lead3", ORCH, "ABC-103 thumbnails"),
+          ],
+        },
+        round: { userArchivedAt: 1 },
+        reviews: [
+          onBranch("br-shared-other", "env_shared", "fix-typo"),
+          onBranch("br-shared-named", "env_shared", "abc-102-image-sizes"),
+          // ABC-103's checkout, moved to a branch that isn't the ticket's.
+          onBranch("br-own-other", "env_thr_lead3", "try-something"),
+        ],
+      },
+    });
+    const board = await boardOf(harness);
+    expect(board.reviewsWaiting.map((r) => [r.targetKey, r.ticketKey])).toEqual([["br-shared-named", "ABC-102"]]);
+    expect(board.tickets.find((t) => t.key === "ABC-103")!.openReview).toBeNull();
+  });
+
+  it("puts an own PR approved in its thread back in Code review when a teammate comments", async () => {
+    const approved = folderReview({
+      kind: "pr",
+      ownPr: true,
+      approvalSent: { at: 9 },
+      turn: { group: "needs", reason: "own", label: "Your PR", at: 7 },
+    });
+    const { harness, world } = await setup({ world: { reviews: [approved] } });
+    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")!.openReview).toBeNull();
+
+    world.reviews = [{ ...approved, turn: { group: "needs", reason: "new-comments", label: "Your PR · 2 new comments", at: 12 } }];
+    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: true });
+    expect((await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")).toMatchObject({
+      stage: "code-review",
+      openReview: { label: "Your PR · 2 new comments", state: "needs-review" },
+    });
+  });
+
+  it("keeps a ticket PR waiting on its author in Building until the agent reports after the review", async () => {
+    const { harness } = await setup({
+      world: {
+        round: { userArchivedAt: 1 },
+        reviews: [
+          {
+            targetKey: "pr-9f8e7d6c5b4a3f2e-77",
+            kind: "pr",
+            ownPr: false,
+            sourceThreadId: "thr_lead1",
+            createdAt: 8,
+            turn: { group: "waiting", reason: "waiting", label: "Changes requested", at: Date.now() - 1000 },
+          },
+        ],
+      },
+    });
+    const ticket = async () => (await boardOf(harness)).tickets.find((t) => t.key === "ABC-101")!;
+    expect(await ticket()).toMatchObject({ stage: "building", openReview: { label: "Changes requested", state: "with-agent" } });
+
+    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "in-review" }, { threadId: "thr_lead1" });
+    expect((await ticket()).stage).toBe("in-review");
+  });
+
   it("assigns a stacked PR's review by its head, not the base that names the ticket below", async () => {
     const { harness } = await setup({
       world: {

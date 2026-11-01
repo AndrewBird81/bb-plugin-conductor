@@ -164,9 +164,10 @@ export class BoardEngine {
 
   /**
    * Assigns each review to one ticket, from its threads' tickets when it has
-   * any, else its folder's only ticket, else the folder's tickets its branch
-   * names. Of several, the ticket its branch names, then its head's, then its
-   * ref's, then the one on its branch, then the first.
+   * any, else the tickets whose checkout is its folder, on their branch or one
+   * naming them; leads sharing a checkout share its branch, so of several there
+   * only the ones its branch names. Of several, the ticket its branch names,
+   * then its head's, then its ref's, then the one on its branch, then the first.
    */
   private assignReviews(reviews: LinkedReview[]): WaitingReview[] {
     const tickets = this.store.listTickets();
@@ -174,9 +175,14 @@ export class BoardEngine {
       const linked = threadIds
         .flatMap((id) => this.store.threadTickets(id))
         .flatMap((link) => tickets.filter((t) => t.key === link.ticketKey));
-      const inFolder = tickets.filter((t) => environmentId && t.environmentId === environmentId);
-      const candidates =
-        linked.length > 0 ? linked : inFolder.length === 1 ? inFolder : inFolder.filter((t) => namesKey(branch, t.key));
+      const inFolder = tickets.filter(
+        (t) =>
+          environmentId &&
+          t.environmentId === environmentId &&
+          ((branch && t.branch === branch) || namesKey(branch, t.key)),
+      );
+      const fromFolder = inFolder.length > 1 ? inFolder.filter((t) => namesKey(branch, t.key)) : inFolder;
+      const candidates = linked.length > 0 ? linked : fromFolder;
       if (candidates.length === 0) return [];
       // A stacked PR's ref is base...head, and its base names the ticket below.
       const head = review.gitRef?.split("...").at(-1) ?? null;

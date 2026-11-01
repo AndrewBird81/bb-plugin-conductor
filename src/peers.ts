@@ -158,6 +158,7 @@ const reviewSchema = z.object({
       group: z.string().nullable().catch(null),
       reason: z.string().nullable().catch(null),
       label: z.string().nullable().catch(null),
+      at: z.number().nullable().optional().catch(null),
     })
     .nullable()
     .optional()
@@ -171,13 +172,14 @@ const lastSendAt = (review: ReviewRow) =>
 
 /**
  * A local review or own PR the user approved in its thread, after the last
- * Send, until its folder moves past it; GitHub never records that, so the
- * turn doesn't show it.
+ * Send, until its folder moves past it or a later turn needs them again;
+ * GitHub never records that, so the turn doesn't show it.
  */
 const approvedInThread = (review: ReviewRow) =>
   (review.kind === "ref" || review.ownPr === true) &&
   review.approvalSent != null &&
   review.approvalSent.at >= lastSendAt(review) &&
+  !(review.turn?.group === "needs" && (review.turn.at ?? 0) > review.approvalSent.at) &&
   // Rows carry no revision, so a later round on the same folder otherwise shows once the agent reports its stage.
   !((review.feature?.changedFiles ?? 0) > 0) &&
   review.status !== "generating";
@@ -192,6 +194,9 @@ function fixesOut(review: ReviewRow): boolean {
   const gone = send?.stopped?.why === "archived" || send?.stopped?.why === "deleted";
   return !!send && send.readyAt == null && !gone && !!review.fixes && review.fixes.reported < review.fixes.sent;
 }
+
+/** A PR the user reviewed on GitHub that isn't their own, waiting on its author: the ticket agent. */
+const waitingOnAuthor = (review: ReviewRow) => review.turn?.reason === "waiting" && review.ownPr !== true;
 
 /** A Push the main thread is committing or pushing. */
 const pushing = (review: ReviewRow) => review.push?.state === "committing" || review.push?.state === "pushing";
@@ -215,7 +220,7 @@ export function reviewState(review: ReviewRow): ReviewState {
   if (turn?.reason === "folder-gone") return "idle";
   if (pushing(review)) return "with-agent";
   if (turn?.reason === "approved" || approvedInThread(review)) return "approved";
-  if (turn?.reason === "fixes-sent" || fixesOut(review)) return "with-agent";
+  if (turn?.reason === "fixes-sent" || fixesOut(review) || waitingOnAuthor(review)) return "with-agent";
   if (turn?.group === "needs") return "needs-review";
   return "idle";
 }
@@ -303,9 +308,14 @@ export async function codeReviews(bb: BbPluginApi): Promise<LinkedReview[]> {
         state: reviewState(review),
         threadId: review.mainThread?.threadId ?? review.sourceThreadId ?? null,
         createdAt: review.createdAt ?? null,
+        // A review on GitHub went to the agent at the turn's time, so a stage it reports afterwards still wins.
         sentAt:
-          Math.max(lastSendAt(review), review.approvalSent?.at ?? 0, pushing(review) ? (review.push?.at ?? 0) : 0) ||
-          null,
+          Math.max(
+            lastSendAt(review),
+            review.approvalSent?.at ?? 0,
+            pushing(review) ? (review.push?.at ?? 0) : 0,
+            waitingOnAuthor(review) ? (review.turn?.at ?? 0) : 0,
+          ) || null,
         threadIds: linkedThreads(review),
         environmentId: review.feature?.environmentId ?? null,
         branch: review.feature?.branch ?? null,
