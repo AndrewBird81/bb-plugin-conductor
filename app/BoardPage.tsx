@@ -29,7 +29,7 @@ import {
   useGo,
   useOpenDecisions,
   useOpenTicket,
-  useReviewPolling,
+  useReviewRefresh,
   useTicketDetail,
 } from "./hooks";
 import { PlanReview } from "./PlanReview";
@@ -62,7 +62,7 @@ export function BoardPage({ subPath }: PluginNavPanelProps) {
   const route = parseRoute(subPath);
   const boards = useBoards();
   const list = boards.data?.boards;
-  useReviewPolling();
+  useReviewRefresh();
   const boardId = routeBoardId(route, list);
 
   let body: ReactNode;

@@ -55,6 +55,14 @@ const PLANNING_STAGES = new Set<Stage | null>([null, "planning", "plan-review"])
 const namesKey = (text: string | null, key: string) =>
   !!text && new RegExp(`(?<![a-z0-9])${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9])`, "i").test(text);
 
+/**
+ * How long after activity on a ticket thread the board re-reads rounds. Code
+ * Review Workspace records a Send or an approval only after delivering it.
+ */
+export const REVIEW_SETTLE_MS = 3_000;
+/** The longest steady activity on a board's threads puts that read off. */
+export const REVIEW_MAX_WAIT_MS = 15_000;
+
 const isRunning = (status: string | undefined) =>
   status !== undefined && (RUNNING_STATUSES as readonly string[]).includes(status);
 
@@ -63,6 +71,10 @@ export class BoardEngine {
   private sweeping: Promise<void> | null = null;
   private facts: Facts = { statuses: new Map(), reviews: [] };
   private reviewsReadAt = 0;
+  private activityRead: ReturnType<typeof setTimeout> | null = null;
+  private activityAt = 0;
+  /** When the activity the next read is for began. */
+  private activitySince: number | null = null;
 
   constructor(
     private readonly bb: BbPluginApi,
@@ -135,8 +147,9 @@ export class BoardEngine {
   }
 
   /**
-   * Re-reads open rounds. Code Review Workspace sends no change signal, so
-   * reads and reports refresh them instead of waiting for the next sweep.
+   * Re-reads open rounds. Code Review Workspace can't signal other plugins,
+   * so reads, reports, ticket thread activity and the board page coming into
+   * view refresh them instead of waiting for the next sweep.
    */
   private async refreshReviews(): Promise<boolean> {
     const reviews = await this.codeReviews();
@@ -156,6 +169,44 @@ export class BoardEngine {
   /** Re-reads rounds now; true when one moved. */
   async pollReviews(): Promise<boolean> {
     return this.refreshReviews();
+  }
+
+  /**
+   * A turn started or ended on one of the board's ticket threads, or a
+   * message was queued or dispatched to it: re-reads rounds once activity
+   * settles, so a burst makes one read. Steady activity gets a read at least
+   * every REVIEW_MAX_WAIT_MS.
+   */
+  threadActivity(): void {
+    const now = Date.now();
+    this.activityAt = now;
+    this.activitySince ??= now;
+    this.scheduleActivityRead();
+  }
+
+  private scheduleActivityRead(): void {
+    if (this.activityRead) clearTimeout(this.activityRead);
+    const at = Math.min(this.activityAt + REVIEW_SETTLE_MS, this.activitySince! + REVIEW_MAX_WAIT_MS);
+    this.activityRead = setTimeout(() => void this.readAfterActivity(), at - Date.now());
+  }
+
+  private async readAfterActivity(): Promise<void> {
+    this.activityRead = null;
+    // A read forced by steady activity may come too soon for the latest events; they get one of their own.
+    const settled = Date.now() >= this.activityAt + REVIEW_SETTLE_MS;
+    this.activitySince = settled ? null : this.activityAt;
+    if (!settled) this.scheduleActivityRead();
+    try {
+      if (await this.refreshReviews()) this.changed();
+    } catch (error) {
+      this.bb.log.warn(`read reviews on board ${this.boardId}: ${String(error)}`);
+    }
+  }
+
+  /** Stops a pending read, as when the board is removed or the plugin unloads. */
+  dispose(): void {
+    if (this.activityRead) clearTimeout(this.activityRead);
+    this.activityRead = null;
   }
 
   /** Called before serving the board; cheap because the reviews are local. */

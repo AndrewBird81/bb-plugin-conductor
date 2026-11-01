@@ -198,26 +198,29 @@ export function useOtherChildren(orchestratorThreadId: string | null, leadIds: R
   return threads.filter((t) => t.parentThreadId === orchestratorThreadId && !leadIds.has(t.id) && !t.isArchived);
 }
 
-const REVIEW_POLL_MS = 5_000;
-
 /**
- * Code Review Workspace's change signals reach only its own pages, so the
- * board asks the server to re-read rounds every few seconds while visible,
- * whether or not Code Review Workspace answered last time: it may be starting.
- * The server publishes a change only when a round moved, or when Code Review
- * Workspace starts or stops answering.
+ * Code Review Workspace's change signals reach only its own pages. The server
+ * re-reads rounds after activity on ticket threads; the board asks it to
+ * re-read too when it opens and when its tab or window comes back into view,
+ * for changes made with no ticket thread active. The server publishes a change
+ * only when a round moved.
  */
-export function useReviewPolling() {
+export function useReviewRefresh() {
   const rpc = useRpc<typeof rpcContract>();
   useEffect(() => {
-    const poll = () => {
-      if (document.visibilityState === "visible") void rpc.call("reviews.poll", null).catch(() => {});
+    let askedAt = 0;
+    const refresh = () => {
+      // Coming back into view can fire both events at once.
+      if (document.visibilityState !== "visible" || Date.now() - askedAt < 1_000) return;
+      askedAt = Date.now();
+      void rpc.call("reviews.poll", null).catch(() => {});
     };
-    const timer = setInterval(poll, REVIEW_POLL_MS);
-    document.addEventListener("visibilitychange", poll);
+    refresh();
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
     return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", poll);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
     };
   }, [rpc]);
 }

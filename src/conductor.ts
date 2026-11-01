@@ -170,6 +170,7 @@ export class Conductor {
 
   removeBoard(boardId: number): boolean {
     const removed = this.store.removeBoard(boardId);
+    this.engines.get(boardId)?.dispose();
     this.engines.delete(boardId);
     this.changed();
     return removed;
@@ -383,6 +384,19 @@ export class Conductor {
   async threadStatusChanged(threadId: string, status: string): Promise<void> {
     const boards = new Set(this.store.threadLinks(threadId).map((link) => link.boardId));
     for (const boardId of boards) await this.engine(boardId).threadStatusChanged(threadId, status);
+  }
+
+  /**
+   * A turn started or ended on a thread, or a message was queued or
+   * dispatched to it; the boards it is a ticket thread on re-read rounds.
+   */
+  threadActivity(threadId: string): void {
+    const boards = new Set(this.store.threadLinks(threadId).map((link) => link.boardId));
+    for (const boardId of boards) this.engine(boardId).threadActivity();
+  }
+
+  dispose(): void {
+    for (const engine of this.engines.values()) engine.dispose();
   }
 
   /** A new child of an orchestrator or of a ticket lead may be a ticket or an implementer. */

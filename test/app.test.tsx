@@ -420,24 +420,48 @@ describe.each([
   });
 });
 
-describe("review polling", () => {
-  it("asks the server to re-read reviews every few seconds, even when Code Review Workspace didn't answer last time", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    try {
-      const current = { ...board, integrations: { linear: true, codeReview: false } };
-      const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
-        rpc: handlers({ ...rpc([decision], [summary], current), "reviews.poll": () => ({ changed: false }) }),
-      });
-      cleanup = () => slot.lifecycle.unmount();
-      await slot.findByText("Accept avatar uploads on sign-up");
-      const polls = () => slot.inspection.rpcCalls.filter((call) => call.method === "reviews.poll").length;
-      expect(polls()).toBe(0);
-      vi.advanceTimersByTime(5_000);
-      await waitFor(() => expect(polls()).toBe(1));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+describe("review refresh", () => {
+  const setVisibility = (state: DocumentVisibilityState) => {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+
+  it.each([true, false])(
+    "asks the server to re-read reviews when the board opens and when it comes back into view, never as time passes (codeReview %s)",
+    async (codeReview) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const current = { ...board, integrations: { linear: true, codeReview } };
+        const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
+          rpc: handlers({ ...rpc([decision], [summary], current), "reviews.poll": () => ({ changed: false }) }),
+        });
+        cleanup = () => slot.lifecycle.unmount();
+        await slot.findByText("Accept avatar uploads on sign-up");
+        const asks = () => slot.inspection.rpcCalls.filter((call) => call.method === "reviews.poll").length;
+        expect(asks()).toBe(1);
+
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(asks()).toBe(1);
+
+        setVisibility("hidden");
+        expect(asks()).toBe(1);
+        setVisibility("visible");
+        // The window gaining focus with it makes no second ask.
+        fireEvent.focus(window);
+        expect(asks()).toBe(2);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        fireEvent.focus(window);
+        expect(asks()).toBe(3);
+
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(asks()).toBe(3);
+      } finally {
+        Reflect.deleteProperty(document, "visibilityState");
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 describe("badge", () => {

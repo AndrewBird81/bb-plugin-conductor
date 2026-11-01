@@ -532,6 +532,14 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.active", ({ thread }) => void conductor.threadStatusChanged(thread.id, thread.status));
   bb.events.on("thread.idle", ({ thread }) => void conductor.threadStatusChanged(thread.id, thread.status));
   bb.events.on("thread.created", ({ thread }) => void conductor.threadCreated(thread.parentThreadId));
+  // Code Review Workspace can't signal other plugins; its Sends, approvals and the agents' reports come with this activity.
+  for (const event of ["thread.active", "thread.idle", "thread.failed"] as const) {
+    bb.events.on(event, ({ thread }) => conductor.threadActivity(thread.id));
+  }
+  for (const event of ["message.queued", "message.dispatched"] as const) {
+    bb.events.on(event, ({ entry }) => conductor.threadActivity(entry.threadId));
+  }
+  bb.onDispose(() => conductor.dispose());
 
   const firstSweep = setTimeout(() => void conductor.sweepAll(), 0);
   bb.onDispose(() => clearTimeout(firstSweep));

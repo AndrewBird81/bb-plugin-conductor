@@ -2,13 +2,15 @@ import { experimental_PluginRpcCallError } from "@get-bb/plugin-sdk";
 import {
   createFakePluginHost,
   makePluginAgentConfigurationContext,
+  makeQueueEntry,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
 import { mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin, { ASK_TOOL, LEGACY_TOOLS, REPORT_TOOL, SETUP_SKILL, SKILL, SUBMIT_PLAN_TOOL } from "../server";
+import { REVIEW_MAX_WAIT_MS, REVIEW_SETTLE_MS } from "../src/board";
 import type { Board, Decision, PlanMark, PlanRound, TicketDetail } from "../src/contract";
 
 const ORCH = "thr_orch";
@@ -24,6 +26,8 @@ interface World {
   reviews: unknown[];
   /** Code Review Workspace's answer to reviews.v1.status in place of the fixture's; it throws when this throws. */
   status: (() => unknown) | null;
+  /** How many times reviews.v1.status was called. */
+  statusReads: number;
   /** Files on the agents' machine, by absolute path. */
   files: Record<string, string>;
   /** Code Review Workspace's reviewThreadChanges, by the thread it runs for; throws when it throws. */
@@ -110,6 +114,7 @@ async function setup(
     round: {},
     reviews: [],
     status: null,
+    statusReads: 0,
     files: {},
     startReview: () => ({ ok: true, targetKey: "br-started" }),
     started: [],
@@ -218,6 +223,7 @@ async function setup(
               throw rpcError(404, null, 'unknown plugin "code-review-workspace"');
             }
             if (args.pluginId === "code-review-workspace" && args.method === "reviews.v1.status") {
+              world.statusReads++;
               if (world.status) return world.status();
               return {
                 reviews: [
@@ -912,6 +918,98 @@ describe("review rounds", () => {
     expect(board.integrations.codeReview).toBe(false);
     expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "planning", openReview: null });
     expect(board.reviewsWaiting).toEqual([]);
+  });
+});
+
+describe("review rounds on ticket thread activity", () => {
+  const WITH_AGENT = { waitsOn: "agent", waitsOnThreadId: "thr_lead1", since: 10, label: "0 of 2 reported" };
+  const stageOf = async (harness: Harness) =>
+    ((await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board).tickets.find((t) => t.key === "ABC-101")!.stage;
+  const turn = (harness: Harness, event: "thread.active" | "thread.idle", id: string) =>
+    harness.emitThreadEvent(event, {
+      thread: makeThreadResponse({ id, status: event === "thread.active" ? "active" : "idle" }),
+      lastAssistantText: null,
+    });
+  const message = (harness: Harness, event: "message.queued" | "message.dispatched", threadId: string) =>
+    harness.emitThreadEvent(event, { entry: makeQueueEntry({ threadId, originPluginId: "code-review-workspace" }) });
+
+  /** A board set up with real timers, then fake ones from here on. */
+  async function setupWithClock(options: Parameters<typeof setup>[0] = {}) {
+    const result = await setup(options);
+    // Lets the plugin's first sweep finish.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    return result;
+  }
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("moves a ticket's card when its thread's turn starts, with no poll", async () => {
+    const { harness, world } = await setupWithClock();
+    expect(await stageOf(harness)).toBe("code-review");
+    world.round = WITH_AGENT;
+    const reads = world.statusReads;
+    const signals = harness.realtimeSignals.length;
+
+    await turn(harness, "thread.active", "thr_lead1");
+    await vi.advanceTimersByTimeAsync(REVIEW_SETTLE_MS);
+    expect(world.statusReads).toBe(reads + 1);
+    expect(harness.realtimeSignals.length).toBeGreaterThan(signals);
+    expect(await stageOf(harness)).toBe("building");
+  });
+
+  it("catches a Send that Code Review Workspace records after delivering it", async () => {
+    const { harness, world } = await setupWithClock();
+    const reads = world.statusReads;
+
+    await message(harness, "message.dispatched", "thr_lead1");
+    await vi.advanceTimersByTimeAsync(500);
+    world.round = WITH_AGENT;
+    expect(world.statusReads).toBe(reads);
+    await vi.advanceTimersByTimeAsync(REVIEW_SETTLE_MS - 500);
+    expect(world.statusReads).toBe(reads + 1);
+    expect(await stageOf(harness)).toBe("building");
+  });
+
+  it("makes one read for a burst of activity on a ticket's threads", async () => {
+    const { harness, world } = await setupWithClock();
+    const reads = world.statusReads;
+
+    await message(harness, "message.queued", "thr_lead1");
+    await vi.advanceTimersByTimeAsync(200);
+    await message(harness, "message.dispatched", "thr_lead1");
+    await turn(harness, "thread.active", "thr_lead1");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await turn(harness, "thread.active", "thr_impl1");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await turn(harness, "thread.idle", "thr_impl1");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(world.statusReads).toBe(reads + 1);
+  });
+
+  it("still reads during steady activity, and again once it settles", async () => {
+    const { harness, world } = await setupWithClock();
+    const reads = world.statusReads;
+
+    for (let elapsed = 0; elapsed < REVIEW_MAX_WAIT_MS; elapsed += 1_000) {
+      await message(harness, "message.queued", "thr_lead1");
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(world.statusReads).toBe(reads + 1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(world.statusReads).toBe(reads + 2);
+  });
+
+  it("makes no read for threads that are not on a board", async () => {
+    const { harness, world } = await setupWithClock();
+    const reads = world.statusReads;
+
+    await turn(harness, "thread.active", "thr_other");
+    await turn(harness, "thread.idle", ORCH);
+    await message(harness, "message.dispatched", "thr_someone_else");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(world.statusReads).toBe(reads);
   });
 });
 
