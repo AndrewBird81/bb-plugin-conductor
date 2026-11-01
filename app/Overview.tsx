@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { STAGES, type Board, type Decision, type PlanRound, type PullRequest, type Stage, type Ticket } from "../src/contract";
 import { useOpenAgentThread, useOpenOrchestratorTab } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
+import { LINK_UNDERLINE, TEXT_LINK, TicketLink } from "./TicketLink";
 import {
   STAGE_HINTS,
   stageLabel,
@@ -147,8 +148,8 @@ function OrchestratorBand({ board }: { board: Board }) {
 }
 
 function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] }) {
-  const openTicket = useOpenTicket();
   const next = board.nextPr;
+  const titles = new Map(board.tickets.map((t) => [t.key, shortTitle(t.title)]));
   const showReviews = board.integrations.codeReview;
   const showNext = board.board.options.rules.onePrAtATime;
   return (
@@ -169,7 +170,7 @@ function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] })
         ) : (
           <div className="space-y-2">
             {board.plansWaiting.map((round) => (
-              <PlanWaitingCard key={round.id} round={round} />
+              <PlanWaitingCard key={round.id} round={round} title={titles.get(round.ticketKey) ?? null} />
             ))}
             {decisions.map((d) => (
               <DecisionCard key={d.id} decision={d} compact />
@@ -186,23 +187,23 @@ function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] })
           {board.reviewsWaiting.length === 0 ? (
             <p className="text-sm text-muted-foreground">No Code Review Workspace round from a ticket agent is open.</p>
           ) : (
-            <ul className="space-y-1 text-sm">
+            <ul className="space-y-2 text-sm">
               {board.reviewsWaiting.map((r) => (
-                <li key={r.targetKey} className="flex flex-wrap gap-x-2">
-                  <button
-                    type="button"
-                    className="font-semibold hover:underline"
-                    onClick={() => openTicket(board.board.id, r.ticketKey)}
-                  >
-                    {r.ticketKey}
-                  </button>
-                  <a
-                    className="hover:underline"
-                    href={`/plugins/code-review-workspace/review/${encodeURIComponent(r.targetKey)}`}
-                  >
-                    Open review
-                  </a>
-                  {r.label && <span className="text-muted-foreground">{r.label}</span>}
+                <li key={r.targetKey}>
+                  <p className="flex items-baseline gap-2">
+                    <TicketLink boardId={board.board.id} ticketKey={r.ticketKey} />
+                    {titles.has(r.ticketKey) && <span className="truncate">{titles.get(r.ticketKey)}</span>}
+                  </p>
+                  <p className="flex flex-wrap items-baseline gap-x-2">
+                    <a
+                      className={TEXT_LINK}
+                      aria-label={`Open review of ${r.ticketKey} in Code Review Workspace`}
+                      href={`/plugins/code-review-workspace/review/${encodeURIComponent(r.targetKey)}`}
+                    >
+                      Open review
+                    </a>
+                    {r.label && <span className="text-muted-foreground">{r.label}</span>}
+                  </p>
                 </li>
               ))}
             </ul>
@@ -223,14 +224,7 @@ function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] })
                     {next.repo} #{next.number}
                   </span>
                 )}{" "}
-                for{" "}
-                <button
-                  type="button"
-                  className="hover:underline"
-                  onClick={() => openTicket(board.board.id, next.ticketKey)}
-                >
-                  {next.ticketKey}
-                </button>
+                for <TicketLink boardId={board.board.id} ticketKey={next.ticketKey} />
               </p>
               <p className="text-muted-foreground">
                 {next.after
@@ -358,16 +352,9 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
     })),
   ];
   const open = () => openTicket(ticket.boardId, ticket.key);
-  // A click anywhere on the card opens the ticket, for the mouse; the header button is the way in for
-  // the keyboard. Inner controls do their own thing, and a drag that selected text is not a click.
-  const openFromCard = (e: MouseEvent<HTMLElement>) => {
-    if ((e.target as Element).closest("a, button, input, textarea, select, label")) return;
-    if (window.getSelection()?.isCollapsed === false) return;
-    open();
-  };
   return (
     <article
-      onClick={openFromCard}
+      onClick={fromCard(open)}
       className={cn(
         "group grid cursor-pointer gap-2.5 rounded-xl border border-border bg-card px-3.5 py-3 hover:bg-muted",
         CONTROL_HOVER_TRANSITION,
@@ -382,7 +369,7 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
         onClick={open}
       >
         <span className="flex w-full items-baseline gap-2">
-          <span className="text-[15px] font-bold tracking-tight underline decoration-muted-foreground underline-offset-[3px] group-hover:decoration-foreground">
+          <span className={cn("text-[15px] font-bold tracking-tight group-hover:decoration-foreground", LINK_UNDERLINE)}>
             {ticket.key}
           </span>{" "}
           {ticket.milestone && (
@@ -443,20 +430,53 @@ function PlanNote({ boardId, ticketKey, round }: { boardId: number; ticketKey: s
   );
 }
 
-/** A plan round in Waiting on you: who sent it, when, and the way in. */
-function PlanWaitingCard({ round }: { round: PlanRound }) {
+/**
+ * A plan round in Waiting on you: whose, when, and the way in. A click anywhere on it reviews the plan;
+ * its key opens the ticket.
+ */
+function PlanWaitingCard({ round, title }: { round: PlanRound; title: string | null }) {
   const go = useGo();
+  const review = () => go.plan(round.boardId, round.ticketKey, round.n);
   return (
-    <article className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-[var(--brand,var(--attention))] bg-card px-3 py-2 text-sm">
-      <span className="font-semibold">{round.ticketKey}</span>
-      <span>Plan round {round.n}</span>
-      <span className="text-xs text-muted-foreground">sent {ago(round.submittedAt)}</span>
-      {round.source === "inferred" && <span className="text-xs text-muted-foreground">found in the plans folder</span>}
-      <Button size="sm" className="ml-auto" onClick={() => go.plan(round.boardId, round.ticketKey, round.n)}>
+    <article
+      aria-label={`${round.ticketKey} plan round ${round.n}`}
+      onClick={fromCard(review)}
+      className={cn(
+        "group/plan grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 rounded-lg border border-[var(--brand,var(--attention))] bg-card px-3 py-2 text-sm hover:bg-muted",
+        CONTROL_HOVER_TRANSITION,
+      )}
+    >
+      <p className="flex flex-wrap items-baseline gap-x-2">
+        <TicketLink boardId={round.boardId} ticketKey={round.ticketKey} />
+        <span>Plan round {round.n}</span>
+      </p>
+      <Button
+        size="sm"
+        className="group-hover/plan:bg-foreground/90"
+        aria-label={`Review plan round ${round.n} of ${round.ticketKey}`}
+        onClick={review}
+      >
         Review plan
       </Button>
+      <p className="col-span-2 flex min-w-0 items-baseline gap-2">
+        {title && <span className="truncate">{title}</span>}
+        <span className="shrink-0 text-xs text-muted-foreground">sent {ago(round.submittedAt)}</span>
+      </p>
+      {round.source === "inferred" && <p className="col-span-2 text-xs text-muted-foreground">Found in the plans folder.</p>}
     </article>
   );
+}
+
+/**
+ * A click anywhere on a card runs its main action, for the mouse; a button on the card is the way in for
+ * the keyboard. Inner controls do their own thing, and a drag that selected text is not a click.
+ */
+function fromCard(action: () => void) {
+  return (e: MouseEvent<HTMLElement>) => {
+    if ((e.target as Element).closest("a, button, input, textarea, select, label")) return;
+    if (window.getSelection()?.isCollapsed === false) return;
+    action();
+  };
 }
 
 function CardNote({ ticket }: { ticket: Ticket }) {

@@ -307,6 +307,119 @@ describe("board page", () => {
   });
 });
 
+describe.each([
+  ["with", true],
+  ["without", false],
+])("Waiting on you and ticket links %s Code Review Workspace", (_, codeReview) => {
+  const waitingReview = { targetKey: "br-104", gitRef: "bb/abc-104", label: "Ready", state: "needs-review" as const, threadId: "thr_lead1", createdAt: 5, sentAt: null, ticketKey: "ABC-104" };
+  // The server sends no review rounds without Code Review Workspace; the board must hide them on the flag alone.
+  const current: Board = {
+    ...board,
+    integrations: { linear: true, codeReview },
+    plansWaiting: [round],
+    reviewsWaiting: [waitingReview],
+  };
+  const ticketPage = (key: string) => ({ method: "toPluginPanel", options: { subPath: `1/${key}` } });
+  const planPage = { method: "toPluginPanel", options: { subPath: "1/ABC-101/plan/1" } };
+  const renderBoard = (openTab?: (call: unknown) => boolean) => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
+      rpc: rpc([decision], [summary], current, [round]),
+      ...(openTab && { experimental_openTab: openTab }),
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    return slot;
+  };
+
+  it("reviews a plan from anywhere on its card, and opens the ticket from its key", async () => {
+    const slot = renderBoard();
+    const card = within(await slot.findByRole("article", { name: "ABC-101 plan round 1" }));
+    const calls = slot.inspection.navigateCalls;
+
+    fireEvent.click(card.getByText("Accept avatar uploads on sign-up"));
+    expect(calls).toEqual([expect.objectContaining(planPage)]);
+    fireEvent.click(card.getByRole("button", { name: "Review plan round 1 of ABC-101" }));
+    expect(calls).toHaveLength(2);
+    expect(calls.at(-1)).toMatchObject(planPage);
+    fireEvent.click(card.getByRole("button", { name: "ABC-101, ticket page" }));
+    expect(calls).toHaveLength(3);
+    expect(calls.at(-1)).toMatchObject(ticketPage("ABC-101"));
+  });
+
+  it("opens the ticket from a decision's key and its agent from Open thread, and its form stays put", async () => {
+    const opened: unknown[] = [];
+    const slot = renderBoard((call) => {
+      opened.push(call);
+      return true;
+    });
+    const card = within(await slot.findByRole("article", { name: `D-7: ${decision.question}` }));
+    const calls = slot.inspection.navigateCalls;
+
+    fireEvent.click(card.getByLabelText(/AvatarUrl/, { selector: "input" }));
+    expect((card.getByLabelText(/AvatarUrl/, { selector: "input" }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(card.getByText("Other:"));
+    fireEvent.change(card.getByLabelText("Your own answer"), { target: { value: "Avatar.URL" } });
+    fireEvent.change(card.getByLabelText("Note for the agent"), { target: { value: "Match PhotoURL later" } });
+    fireEvent.click(card.getByRole("button", { name: "Answer" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual({
+        method: "decisions.answer",
+        input: { id: 7, choice: "Avatar.URL", note: "Match PhotoURL later" },
+      }),
+    );
+    expect(calls).toEqual([]);
+
+    fireEvent.click(card.getByRole("button", { name: "Open thread that asked D-7" }));
+    expect(opened.at(-1)).toMatchObject({ tab: { id: "agent" }, params: { threadId: "thr_impl1" }, title: "ABC-101 D-7" });
+    expect(calls).toEqual([]);
+
+    fireEvent.click(card.getByRole("button", { name: "ABC-101, ticket page" }));
+    expect(calls).toEqual([expect.objectContaining(ticketPage("ABC-101"))]);
+  });
+
+  it("opens a ticket's page from its board card and from Next PR's key", async () => {
+    const slot = renderBoard();
+    const calls = slot.inspection.navigateCalls;
+    const inReview = within(await slot.findByRole("region", { name: "In review" }));
+
+    fireEvent.click(inReview.getByText("1 of 3 merged."));
+    expect(calls).toEqual([expect.objectContaining(ticketPage("ABC-104"))]);
+    const next = slot.getByText("Next PR to open").parentElement!;
+    fireEvent.click(within(next).getByRole("button", { name: "ABC-104, ticket page" }));
+    expect(calls).toHaveLength(2);
+    expect(calls.at(-1)).toMatchObject(ticketPage("ABC-104"));
+  });
+
+  it(codeReview ? "lists review rounds by ticket, with links to the ticket and the review" : "hides review rounds", async () => {
+    const slot = renderBoard();
+    await slot.findByRole("article", { name: "ABC-101 plan round 1" });
+    if (!codeReview) {
+      expect(slot.queryByRole("heading", { name: /review round/ })).toBeNull();
+      expect(slot.queryByRole("link", { name: /Open review/ })).toBeNull();
+      return;
+    }
+    const row = slot.getByRole("link", { name: "Open review of ABC-104 in Code Review Workspace" }).closest("li")!;
+    expect(within(row).getByRole("link").getAttribute("href")).toBe("/plugins/code-review-workspace/review/br-104");
+    expect(row.textContent).toContain("One upload path for every image");
+    fireEvent.click(within(row).getByRole("button", { name: "ABC-104, ticket page" }));
+    expect(slot.inspection.navigateCalls).toEqual([expect.objectContaining(ticketPage("ABC-104"))]);
+  });
+
+  it("shows the ticket page's decisions without a ticket link, and Reviews only with the plugin", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, {
+      rpc: handlers({
+        ...rpc([decision], [summary], current),
+        "board.ticket": () => ({ detail: { ticket, decisions: [decision], stageEvents: [], reviews: [], linear: null } }),
+      }),
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    const card = within(await slot.findByRole("article", { name: `D-7: ${decision.question}` }));
+    expect(card.queryByRole("button", { name: /ticket page/ })).toBeNull();
+    expect(card.getByRole("button", { name: "Open thread that asked D-7" })).toBeTruthy();
+    expect(slot.getByText("Pull requests")).toBeTruthy();
+    expect(slot.queryByRole("heading", { name: /^Reviews/ }) !== null).toBe(codeReview);
+  });
+});
+
 describe("badge", () => {
   function BadgeProbe() {
     return <output>{JSON.stringify(useDecisionBadge())}</output>;
@@ -423,7 +536,7 @@ describe("plan review", () => {
     cleanup = () => slot.lifecycle.unmount();
     const waiting = await slot.findByText("Plan round 1");
     expect(waiting.closest("article")!.textContent).toContain("ABC-101");
-    fireEvent.click(within(waiting.closest("article")!).getByRole("button", { name: "Review plan" }));
+    fireEvent.click(within(waiting.closest("article")!).getByRole("button", { name: "Review plan round 1 of ABC-101" }));
     expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ method: "toPluginPanel", options: { subPath: "1/ABC-101/plan/1" } });
   });
 
