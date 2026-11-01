@@ -688,11 +688,19 @@ describe("review rounds", () => {
 
   it("counts comments out on a folder review that became its own PR's as with the agent, until they come back", async () => {
     const send = { at: 10, threadId: "thr_lead2" };
-    const ownPr = (sends: unknown[], turn = { group: "needs", reason: "own", label: "Your PR" }) =>
+    const ownPr = (sends: unknown[], turn: Record<string, unknown> = { group: "needs", reason: "own", label: "Your PR", at: 7 }) =>
       folderReview({ kind: "pr", ownPr: true, sends, fixes: { sent: 2, reported: 1 }, turn });
     const { harness, world } = await setup({ world: { reviews: [ownPr([send])] } });
     const abc102 = async () => (await boardOf(harness)).tickets.find((t) => t.key === "ABC-102")!;
     expect(await abc102()).toMatchObject({ stage: "building", openReview: { state: "with-agent", label: "1 of 2 reported" } });
+
+    // A teammate's comment after the Send is the user's turn, whatever is still out.
+    world.reviews = [ownPr([send], { group: "needs", reason: "new-comments", label: "Your PR · 1 new comment", at: 11 })];
+    expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: true });
+    expect(await abc102()).toMatchObject({
+      stage: "code-review",
+      openReview: { state: "needs-review", label: "Your PR · 1 new comment" },
+    });
 
     world.reviews = [ownPr([{ ...send, readyAt: 12 }], { group: "needs", reason: "fixes-ready", label: "Ready to re-review" })];
     expect(await harness.behavior.callRpc("reviews.poll", null)).toEqual({ changed: true });

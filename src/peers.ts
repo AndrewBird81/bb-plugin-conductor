@@ -185,14 +185,23 @@ const approvedInThread = (review: ReviewRow) =>
   review.status !== "generating";
 
 /**
- * Comments the last Send has out unreported, its thread neither done nor
- * archived or deleted, as Code Review Workspace's `fixesState` reads them;
- * its turn says so only for local reviews, not one that became its own PR's.
+ * Comments a PR review's last Send has out unreported, its thread neither done
+ * nor archived or deleted, as Code Review Workspace's `fixesState` reads them,
+ * with no turn for the user since; its turn says so only for local reviews.
  */
 function fixesOut(review: ReviewRow): boolean {
   const send = review.sends?.at(-1);
   const gone = send?.stopped?.why === "archived" || send?.stopped?.why === "deleted";
-  return !!send && send.readyAt == null && !gone && !!review.fixes && review.fixes.reported < review.fixes.sent;
+  const yoursSince = review.turn?.group === "needs" && (review.turn.at ?? 0) > (send?.at ?? 0);
+  return (
+    review.kind === "pr" &&
+    !!send &&
+    send.readyAt == null &&
+    !gone &&
+    !yoursSince &&
+    !!review.fixes &&
+    review.fixes.reported < review.fixes.sent
+  );
 }
 
 /** A PR the user reviewed on GitHub that isn't their own, waiting on its author: the ticket agent. */
