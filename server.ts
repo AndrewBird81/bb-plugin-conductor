@@ -207,6 +207,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
     "decisions.withdraw": ({ id, note }) => conductor.withdraw(id, note || null),
     "decisions.retryDelivery": ({ id }) => conductor.retryDelivery(id),
     "reviews.poll": async () => ({ changed: await conductor.pollReviews() }),
+    "reviews.start": ({ boardId, key }) => conductor.engine(boardId).startReview(key),
     "thread.ticket": ({ threadId }) => conductor.threadView(threadId),
     "orchestrators.list": () => ({ boards: conductor.orchestrators() }),
     "plans.waiting": () => ({ rounds: conductor.plansWaiting() }),
@@ -616,6 +617,14 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
   bb.events.on("thread.active", ({ thread }) => void conductor.threadStatusChanged(thread.id, thread.status));
   bb.events.on("thread.idle", ({ thread }) => void conductor.threadStatusChanged(thread.id, thread.status));
   bb.events.on("thread.created", ({ thread }) => void conductor.threadCreated(thread.parentThreadId));
+  // Code Review Workspace can't signal other plugins; its Sends, approvals and the agents' reports come with this activity.
+  for (const event of ["thread.active", "thread.idle", "thread.failed"] as const) {
+    bb.events.on(event, ({ thread }) => conductor.threadActivity(thread.id));
+  }
+  for (const event of ["message.queued", "message.dispatched"] as const) {
+    bb.events.on(event, ({ entry }) => conductor.threadActivity(entry.threadId));
+  }
+  bb.onDispose(() => conductor.dispose());
 
   const firstSweep = setTimeout(() => void conductor.sweepAll(), 0);
   bb.onDispose(() => clearTimeout(firstSweep));

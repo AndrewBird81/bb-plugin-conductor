@@ -16,11 +16,12 @@ import {
 import { deliver } from "./decisions";
 import { Landings, runGh, type Gh } from "./github";
 import { applyOptionsPatch, boardOptionsSchema, DEFAULT_TICKET_PATTERN, type BoardOptionsPatch } from "./options";
+import { codeReviews, type LinkedReview } from "./peers";
 import { planDiff, planFeedbackMessage } from "./plans";
 import type { NewDecision, Store, TableName } from "./store";
 
 /** Plugin ids of the optional peers the board reads from. */
-const PEERS = { linear: "linear", codeReview: "code-review-workspace" } as const;
+const PEERS = { linear: "linear" } as const;
 
 const exportSchema = z.object({
   settings: z.record(z.string(), z.string()),
@@ -68,16 +69,34 @@ export class Conductor {
     return this.integrations;
   }
 
-  /** Which optional plugins are running; read once per sweep. */
+  /**
+   * Which optional plugins this bb has: Linear when it's running, read once
+   * per sweep, and Code Review Workspace when it answers its review status,
+   * which every read of its reviews asks again.
+   */
   async refreshIntegrations(): Promise<Integrations> {
     try {
       const { plugins } = await this.bb.sdk.plugins.list();
       const running = (id: string) => plugins.some((p) => p.id === id && p.enabled && p.status === "running");
-      this.integrations = { linear: running(PEERS.linear), codeReview: running(PEERS.codeReview) };
+      this.integrations = { ...this.integrations, linear: running(PEERS.linear) };
     } catch (error) {
       this.bb.log.warn(`plugins.list: ${String(error)}`);
     }
+    await this.codeReviews();
     return this.integrations;
+  }
+
+  /**
+   * Code Review Workspace's reviews. Without a valid answer, as while it
+   * starts, it counts as missing until a later read gets one.
+   */
+  async codeReviews(): Promise<LinkedReview[]> {
+    const reviews = await codeReviews(this.bb);
+    if ((reviews !== null) !== this.integrations.codeReview) {
+      this.integrations = { ...this.integrations, codeReview: reviews !== null };
+      this.changed();
+    }
+    return reviews ?? [];
   }
 
   engine(boardId: number): BoardEngine {
@@ -88,6 +107,7 @@ export class Conductor {
         this.bb,
         this.store.board(boardId),
         () => this.integrations,
+        () => this.codeReviews(),
         () => this.changed(),
         this.landings,
       );
@@ -157,6 +177,7 @@ export class Conductor {
 
   removeBoard(boardId: number): boolean {
     const removed = this.store.removeBoard(boardId);
+    this.engines.get(boardId)?.dispose();
     this.engines.delete(boardId);
     this.changed();
     return removed;
@@ -398,6 +419,19 @@ export class Conductor {
   async threadStatusChanged(threadId: string, status: string): Promise<void> {
     const boards = new Set(this.store.threadLinks(threadId).map((link) => link.boardId));
     for (const boardId of boards) await this.engine(boardId).threadStatusChanged(threadId, status);
+  }
+
+  /**
+   * A turn started or ended on a thread, or a message was queued or
+   * dispatched to it; the boards it is a ticket thread on re-read rounds.
+   */
+  threadActivity(threadId: string): void {
+    const boards = new Set(this.store.threadLinks(threadId).map((link) => link.boardId));
+    for (const boardId of boards) this.engine(boardId).threadActivity();
+  }
+
+  dispose(): void {
+    for (const engine of this.engines.values()) engine.dispose();
   }
 
   /** A new child of an orchestrator or of a ticket lead may be a ticket or an implementer. */

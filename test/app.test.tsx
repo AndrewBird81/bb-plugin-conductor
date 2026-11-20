@@ -7,8 +7,8 @@ import {
   type PluginRpcTestHandlers,
 } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginRpcContract } from "@get-bb/plugin-sdk/app";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Board, BoardSummary, Decision, PlanMark, PlanRound, rpcContract, Ticket } from "../src/contract";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Board, BoardSummary, Decision, PlanMark, PlanRound, Review, rpcContract, Ticket, TicketDetail } from "../src/contract";
 import { boardOptionsSchema } from "../src/options";
 import { useDecisionBadge } from "../app/hooks";
 
@@ -257,6 +257,46 @@ describe("board page", () => {
     );
   });
 
+  it("opens a ticket's page from its card, by its header button or a click elsewhere on it", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: rpc() });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Accept avatar uploads on sign-up");
+    const ticketPage = { method: "toPluginPanel", options: { subPath: "1/ABC-101" } };
+    const calls = slot.inspection.navigateCalls;
+
+    fireEvent.click(slot.getByRole("button", { name: "ABC-101 M4 1 decision accounts-api Accept avatar uploads on sign-up" }));
+    expect(calls).toHaveLength(1);
+    expect(calls.at(-1)).toMatchObject(ticketPage);
+
+    const shared = slot.getByText("Same agents as ABC-103.");
+    fireEvent.click(shared);
+    expect(calls).toHaveLength(2);
+    expect(calls.at(-1)).toMatchObject(ticketPage);
+
+    // A drag that selected text ends in a click too; it should not leave the board.
+    window.getSelection()!.selectAllChildren(shared);
+    fireEvent.click(shared);
+    window.getSelection()!.removeAllRanges();
+    expect(calls).toHaveLength(2);
+  });
+
+  it("opens an agent from its card's agent button without opening the ticket", async () => {
+    const opened: unknown[] = [];
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, {
+      rpc: rpc(),
+      experimental_openTab: (call) => {
+        opened.push(call);
+        return true;
+      },
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Accept avatar uploads on sign-up");
+
+    fireEvent.click(within(slot.getByRole("region", { name: "Plan review" })).getByRole("button", { name: "Lead" }));
+    expect(opened.at(-1)).toMatchObject({ tab: { id: "agent" }, params: { threadId: "thr_lead1" } });
+    expect(slot.inspection.navigateCalls).toEqual([]);
+  });
+
   it("sends a custom answer typed under Other", async () => {
     const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: rpc() });
     cleanup = () => slot.lifecycle.unmount();
@@ -410,6 +450,163 @@ describe("blocked tickets", () => {
   });
 });
 
+describe.each([
+  ["with", true],
+  ["without", false],
+])("Waiting on you and ticket links %s Code Review Workspace", (_, codeReview) => {
+  const waitingReview = { targetKey: "br-104", id: "media-jobs:bb/abc-104", label: "Ready", state: "needs-review" as const, threadId: "thr_lead1", createdAt: 5, since: 5, ticketKey: "ABC-104" };
+  // The server sends no review rounds without Code Review Workspace; the board must hide them on the flag alone.
+  const current: Board = {
+    ...board,
+    integrations: { linear: true, codeReview },
+    plansWaiting: [round],
+    reviewsWaiting: [waitingReview],
+  };
+  const ticketPage = (key: string) => ({ method: "toPluginPanel", options: { subPath: `1/${key}` } });
+  const planPage = { method: "toPluginPanel", options: { subPath: "1/ABC-101/plan/1" } };
+  const renderBoard = (openTab?: (call: unknown) => boolean) => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
+      rpc: rpc([decision], [summary], current, [round]),
+      ...(openTab && { experimental_openTab: openTab }),
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    return slot;
+  };
+
+  it("reviews a plan from anywhere on its card, and opens the ticket from its key", async () => {
+    const slot = renderBoard();
+    const card = within(await slot.findByRole("article", { name: "ABC-101 plan round 1" }));
+    const calls = slot.inspection.navigateCalls;
+
+    fireEvent.click(card.getByText("Accept avatar uploads on sign-up"));
+    expect(calls).toEqual([expect.objectContaining(planPage)]);
+    fireEvent.click(card.getByRole("button", { name: "Review plan round 1 of ABC-101" }));
+    expect(calls).toHaveLength(2);
+    expect(calls.at(-1)).toMatchObject(planPage);
+    fireEvent.click(card.getByRole("button", { name: "ABC-101, ticket page" }));
+    expect(calls).toHaveLength(3);
+    expect(calls.at(-1)).toMatchObject(ticketPage("ABC-101"));
+  });
+
+  it("opens the ticket from a decision's key and its agent from Open thread, and its form stays put", async () => {
+    const opened: unknown[] = [];
+    const slot = renderBoard((call) => {
+      opened.push(call);
+      return true;
+    });
+    const card = within(await slot.findByRole("article", { name: `D-7: ${decision.question}` }));
+    const calls = slot.inspection.navigateCalls;
+
+    fireEvent.click(card.getByLabelText(/AvatarUrl/, { selector: "input" }));
+    expect((card.getByLabelText(/AvatarUrl/, { selector: "input" }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(card.getByText("Other:"));
+    fireEvent.change(card.getByLabelText("Your own answer"), { target: { value: "Avatar.URL" } });
+    fireEvent.change(card.getByLabelText("Note for the agent"), { target: { value: "Match PhotoURL later" } });
+    fireEvent.click(card.getByRole("button", { name: "Answer" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual({
+        method: "decisions.answer",
+        input: { id: 7, choice: "Avatar.URL", note: "Match PhotoURL later" },
+      }),
+    );
+    expect(calls).toEqual([]);
+
+    fireEvent.click(card.getByRole("button", { name: "Open thread that asked D-7" }));
+    expect(opened.at(-1)).toMatchObject({ tab: { id: "agent" }, params: { threadId: "thr_impl1" }, title: "ABC-101 D-7" });
+    expect(calls).toEqual([]);
+
+    fireEvent.click(card.getByRole("button", { name: "ABC-101, ticket page" }));
+    expect(calls).toEqual([expect.objectContaining(ticketPage("ABC-101"))]);
+  });
+
+  it("opens a ticket's page from its board card and from Next PR's key", async () => {
+    const slot = renderBoard();
+    const calls = slot.inspection.navigateCalls;
+    const inReview = within(await slot.findByRole("region", { name: "In review" }));
+
+    fireEvent.click(inReview.getByText("1 of 3 merged."));
+    expect(calls).toEqual([expect.objectContaining(ticketPage("ABC-104"))]);
+    const next = slot.getByText("Next PR to open").parentElement!;
+    fireEvent.click(within(next).getByRole("button", { name: "ABC-104, ticket page" }));
+    expect(calls).toHaveLength(2);
+    expect(calls.at(-1)).toMatchObject(ticketPage("ABC-104"));
+  });
+
+  it(codeReview ? "lists review rounds by ticket, with links to the ticket and the review" : "hides review rounds", async () => {
+    const slot = renderBoard();
+    await slot.findByRole("article", { name: "ABC-101 plan round 1" });
+    if (!codeReview) {
+      expect(slot.queryByRole("heading", { name: /review round/ })).toBeNull();
+      expect(slot.queryByRole("link", { name: /Open review/ })).toBeNull();
+      return;
+    }
+    const row = slot.getByRole("link", { name: "Open review of ABC-104 in Code Review Workspace" }).closest("li")!;
+    expect(within(row).getByRole("link").getAttribute("href")).toBe("/plugins/code-review-workspace/review/br-104");
+    expect(row.textContent).toContain("One upload path for every image");
+    fireEvent.click(within(row).getByRole("button", { name: "ABC-104, ticket page" }));
+    expect(slot.inspection.navigateCalls).toEqual([expect.objectContaining(ticketPage("ABC-104"))]);
+  });
+
+  it("shows the ticket page's decisions without a ticket link, and Reviews only with the plugin", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, {
+      rpc: handlers({
+        ...rpc([decision], [summary], current),
+        "board.ticket": () => ({ detail: { ticket, decisions: [decision], stageEvents: [], reviews: [], linear: null, draftPlan: null } }),
+      }),
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    const card = within(await slot.findByRole("article", { name: `D-7: ${decision.question}` }));
+    expect(card.queryByRole("button", { name: /ticket page/ })).toBeNull();
+    expect(card.getByRole("button", { name: "Open thread that asked D-7" })).toBeTruthy();
+    expect(slot.getByText("Pull requests")).toBeTruthy();
+    expect(slot.queryByRole("heading", { name: /^Reviews/ }) !== null).toBe(codeReview);
+  });
+});
+
+describe("review refresh", () => {
+  const setVisibility = (state: DocumentVisibilityState) => {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+
+  it.each([true, false])(
+    "asks the server to re-read reviews when the board opens and when it comes back into view, never as time passes (codeReview %s)",
+    async (codeReview) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const current = { ...board, integrations: { linear: true, codeReview } };
+        const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
+          rpc: handlers({ ...rpc([decision], [summary], current), "reviews.poll": () => ({ changed: false }) }),
+        });
+        cleanup = () => slot.lifecycle.unmount();
+        await slot.findByText("Accept avatar uploads on sign-up");
+        const asks = () => slot.inspection.rpcCalls.filter((call) => call.method === "reviews.poll").length;
+        expect(asks()).toBe(1);
+
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(asks()).toBe(1);
+
+        setVisibility("hidden");
+        expect(asks()).toBe(1);
+        setVisibility("visible");
+        // The window gaining focus with it makes no second ask.
+        fireEvent.focus(window);
+        expect(asks()).toBe(2);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        fireEvent.focus(window);
+        expect(asks()).toBe(3);
+
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(asks()).toBe(3);
+      } finally {
+        Reflect.deleteProperty(document, "visibilityState");
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
 describe("badge", () => {
   function BadgeProbe() {
     return <output>{JSON.stringify(useDecisionBadge())}</output>;
@@ -526,7 +723,7 @@ describe("plan review", () => {
     cleanup = () => slot.lifecycle.unmount();
     const waiting = await slot.findByText("Plan round 1");
     expect(waiting.closest("article")!.textContent).toContain("ABC-101");
-    fireEvent.click(within(waiting.closest("article")!).getByRole("button", { name: "Review plan" }));
+    fireEvent.click(within(waiting.closest("article")!).getByRole("button", { name: "Review plan round 1 of ABC-101" }));
     expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ method: "toPluginPanel", options: { subPath: "1/ABC-101/plan/1" } });
   });
 
@@ -605,5 +802,96 @@ describe("after a plan decision", () => {
     expect(await slot.findByText("Nothing else waits on you.")).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: "Back to the board" }));
     expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ options: { subPath: "1" } });
+  });
+});
+
+describe("review changes", () => {
+  const review: Review = {
+    targetKey: "br-live",
+    id: "accounts-api:bb/abc-101",
+    label: "2 of 6 reported",
+    state: "with-agent",
+    threadId: "thr_lead1",
+    createdAt: 5,
+    since: 6,
+  };
+  const detail = (reviews: Review[]): TicketDetail => ({ ticket, decisions: [], stageEvents: [], reviews, linear: null, draftPlan: null });
+  const ticketRpc = (reviews: Review[], codeReview = true, start?: () => { targetKey: string }) => {
+    const current = { ...board, integrations: { linear: true, codeReview } };
+    return handlers({
+      ...rpc([decision], [summary], current),
+      "board.ticket": () => ({ detail: detail(reviews) }),
+      "reviews.start": start ?? (() => ({ targetKey: "br-started" })),
+    });
+  };
+  // The host routes link clicks in place; here they are only recorded.
+  const followed: string[] = [];
+  const follow = (event: MouseEvent) => {
+    const link = (event.target as Element).closest("a");
+    if (!link) return;
+    event.preventDefault();
+    followed.push(link.getAttribute("href") ?? "");
+  };
+  beforeEach(() => {
+    followed.length = 0;
+    document.addEventListener("click", follow);
+  });
+  afterEach(() => document.removeEventListener("click", follow));
+
+  it("is hidden without Code Review Workspace", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: ticketRpc([], false) });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Pull requests");
+    expect(slot.queryByRole("button", { name: "Review changes" })).toBeNull();
+  });
+
+  it("starts the folder review and goes to it", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: ticketRpc([]) });
+    cleanup = () => slot.lifecycle.unmount();
+    fireEvent.click(await slot.findByRole("button", { name: "Review changes" }));
+    expect(slot.queryByRole("link", { name: "Open review" })).toBeNull();
+    await waitFor(() => expect(followed).toEqual(["/plugins/code-review-workspace/review/br-started"]));
+    expect(slot.inspection.rpcCalls).toContainEqual({ method: "reviews.start", input: { boardId: 1, key: "ABC-101" } });
+  });
+
+  it("links to the ticket's live review instead of starting one", async () => {
+    const done: Review = { ...review, targetKey: "br-done", state: "approved" };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: ticketRpc([done, review]) });
+    cleanup = () => slot.lifecycle.unmount();
+    const open = await slot.findByRole("link", { name: "Open review" });
+    expect(open.getAttribute("href")).toBe("/plugins/code-review-workspace/review/br-live");
+    expect(slot.queryByRole("button", { name: "Review changes" })).toBeNull();
+    fireEvent.click(open);
+    expect(followed).toEqual(["/plugins/code-review-workspace/review/br-live"]);
+    expect(slot.inspection.rpcCalls.map((call) => call.method)).not.toContain("reviews.start");
+  });
+
+  it("links a live review whatever the folder, and starts none without one", async () => {
+    const noFolder = (reviews: Review[]) =>
+      handlers({
+        ...rpc([decision], [summary], { ...board, integrations: { linear: true, codeReview: true } }),
+        "board.ticket": () => ({ detail: { ...detail(reviews), ticket: { ...ticket, environmentId: null } } }),
+      });
+    let slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: noFolder([review]) });
+    cleanup = () => slot.lifecycle.unmount();
+    expect((await slot.findByRole("link", { name: "Open review" })).getAttribute("href")).toBe(
+      "/plugins/code-review-workspace/review/br-live",
+    );
+    slot.lifecycle.unmount();
+    slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: noFolder([]) });
+    await slot.findByText("Pull requests");
+    expect(slot.queryByRole("button", { name: "Review changes" })).toBeNull();
+    expect(slot.queryByRole("link", { name: "Open review" })).toBeNull();
+  });
+
+  it("shows why a review did not start", async () => {
+    const start = () => {
+      throw new Error("This thread’s folder isn’t on a branch.");
+    };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101" }, { rpc: ticketRpc([], true, start) });
+    cleanup = () => slot.lifecycle.unmount();
+    fireEvent.click(await slot.findByRole("button", { name: "Review changes" }));
+    expect((await slot.findByRole("alert")).textContent).toContain("isn’t on a branch");
+    expect(followed).toEqual([]);
   });
 });

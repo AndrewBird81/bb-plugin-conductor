@@ -1,6 +1,7 @@
-// Reads from other installed plugins over their RPC. Neither contract is
-// published, so parse only the fields we use and treat any failure as
-// "no data" rather than failing the board.
+// Reads from other installed plugins over their RPC: Linear's, which isn't
+// published, and Code Review Workspace's published one. Parse only the
+// fields we use and treat any failure as "no data" rather than failing the
+// board.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { LinearIssue, Review, ReviewState } from "./contract";
@@ -110,43 +111,37 @@ export async function linearIssue(
   }
 }
 
-const sentSchema = z.object({ at: z.number() }).passthrough().nullable().optional().catch(null);
-
-const reviewSchema = z.object({
+/** A review as Code Review Workspace (1.10+) publishes it in `reviews.v1.status`, as far as the board reads it. */
+const reviewStatusSchema = z.object({
   targetKey: z.string(),
-  kind: z.string().nullable().optional().catch(null),
-  gitRef: z.string().nullable().catch(null),
-  sourceThreadId: z.string().nullable().catch(null),
-  sourceThreadAt: z.number().nullable().optional().catch(null),
-  userArchivedAt: z.number().nullable().catch(null),
-  turnGroup: z.string().nullable().optional().catch(null),
-  approvalSent: sentSchema,
-  sent: sentSchema,
-  createdAt: z.number().nullable().catch(null),
-  turn: z.object({ label: z.string().nullable().catch(null) }).nullable().catch(null),
+  id: z.string(),
+  createdAt: z.number(),
+  branch: z.string().nullable(),
+  folder: z.object({ environmentId: z.string() }).nullable(),
+  mainThreadId: z.string().nullable(),
+  threadIds: z.array(z.string()),
+  waitsOn: z.enum(["user", "agent", "author", "nobody"]),
+  approved: z.boolean(),
+  since: z.number(),
+  label: z.string(),
+  archived: z.boolean(),
+  mergedInto: z.string().nullable(),
 });
+type ReviewStatus = z.infer<typeof reviewStatusSchema>;
 
 /**
- * Where a round stands for the user. A local round (`bb review <ref>`) always
- * reads "Ready" in Code Review Workspace, so what he sent back to the agent
- * after the round opened decides it; a PR round follows its turn group.
+ * Where a review stands for the board, from who it waits on. On a PR not
+ * under the user's login, its author is the ticket's agent.
  */
-export function reviewState(review: z.infer<typeof reviewSchema>): ReviewState {
-  if (review.userArchivedAt != null || review.turnGroup === "archive") return "archived";
-  const opened = review.sourceThreadAt ?? review.createdAt ?? 0;
-  const approvedAt = review.approvalSent?.at ?? null;
-  const commentedAt = review.sent?.at ?? null;
-  if (approvedAt !== null && approvedAt >= opened && approvedAt >= (commentedAt ?? 0)) return "approved";
-  if (commentedAt !== null && commentedAt >= opened) return "with-agent";
-  if (review.kind !== "ref" && review.turnGroup) {
-    if (review.turnGroup === "reviewed") return "approved";
-    if (review.turnGroup === "waiting") return "with-agent";
-  }
-  return "needs-review";
+export function reviewState(review: ReviewStatus): ReviewState {
+  if (review.archived) return "archived";
+  if (review.waitsOn === "user") return "needs-review";
+  if (review.waitsOn === "agent" || review.waitsOn === "author") return "with-agent";
+  return review.approved ? "approved" : "idle";
 }
 
-// Rows are parsed one by one so one odd review cannot hide the rest.
-const reviewsSchema = z.object({ reviews: z.array(z.unknown()) });
+/** A review with what ties it to tickets: its threads, its folder and its branch. */
+export type LinkedReview = Review & { threadIds: string[]; environmentId: string | null; branch: string | null };
 
 const resolvedSchema = z.object({
   issues: z.array(
@@ -192,38 +187,62 @@ export async function linearResolve(
   return out;
 }
 
-/** Code Review Workspace reviews opened from any of these threads. */
-export async function reviewsForThreads(
-  bb: BbPluginApi,
-  threadIds: string[],
-): Promise<Review[]> {
-  if (threadIds.length === 0) return [];
+/**
+ * Every Code Review Workspace review, newest first, from `reviews.v1.status`;
+ * null without a valid answer: Code Review Workspace missing, disabled, older
+ * than 1.10, failing or answering junk. A review merged into another is left
+ * out: its key leads to the one that goes on.
+ */
+export async function codeReviews(bb: BbPluginApi): Promise<LinkedReview[] | null> {
   try {
     const { reviews } = await bb.sdk.plugins.callRpc({
       pluginId: "code-review-workspace",
-      method: "listReviews",
+      method: "reviews.v1.status",
       input: null,
-      outputSchema: reviewsSchema,
+      outputSchema: z.object({ reviews: z.array(reviewStatusSchema) }),
     });
-    const wanted = new Set(threadIds);
     return reviews
-      .flatMap((raw) => {
-        const parsed = reviewSchema.safeParse(raw);
-        return parsed.success ? [parsed.data] : [];
-      })
-      .filter((review) => review.sourceThreadId && wanted.has(review.sourceThreadId))
+      .filter((review) => review.mergedInto === null)
       .map((review) => ({
         targetKey: review.targetKey,
-        gitRef: review.gitRef,
-        label: review.turn?.label ?? null,
+        id: review.id,
+        label: review.label,
         state: reviewState(review),
-        threadId: review.sourceThreadId!,
+        threadId: review.mainThreadId,
         createdAt: review.createdAt,
-        sentAt: Math.max(review.sent?.at ?? 0, review.approvalSent?.at ?? 0) || null,
-      }))
-      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+        since: review.since,
+        threadIds: review.threadIds,
+        environmentId: review.folder?.environmentId ?? null,
+        branch: review.branch,
+      }));
   } catch (error) {
-    bb.log.warn(`code-review-workspace listReviews: ${String(error)}`);
-    return [];
+    // BB's call error carries the HTTP status. Missing, older than 1.10 or still starting answers 404, and not
+    // running 503: expected, so not logged.
+    const status = (error as { status?: unknown } | null)?.status;
+    if (status !== 404 && status !== 503) bb.log.warn(`code-review-workspace reviews.v1.status: ${String(error)}`);
+    return null;
   }
+}
+
+const startedSchema = z.object({ ok: z.boolean(), error: z.string().optional(), targetKey: z.string().optional() });
+
+/**
+ * Starts or opens the review of a thread's folder, as `bb review` with no
+ * arguments does there; returns its key, or throws with Code Review Workspace's reason.
+ */
+export async function startCodeReview(bb: BbPluginApi, threadId: string): Promise<string> {
+  let started: z.infer<typeof startedSchema>;
+  try {
+    started = await bb.sdk.plugins.callRpc({
+      pluginId: "code-review-workspace",
+      method: "reviewThreadChanges",
+      input: { threadId },
+      outputSchema: startedSchema,
+    });
+  } catch (error) {
+    bb.log.warn(`code-review-workspace reviewThreadChanges: ${String(error)}`);
+    throw new Error(`Couldn't reach Code Review Workspace: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (started.ok && started.targetKey) return started.targetKey;
+  throw new Error(started.error || "Code Review Workspace didn't start the review. Try again.");
 }

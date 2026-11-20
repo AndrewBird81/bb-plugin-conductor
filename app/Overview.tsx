@@ -1,10 +1,12 @@
-import { useState, type ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { UrlLink, experimental_useRpcMutation as useRpcMutation, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
+import { CONTROL_HOVER_TRANSITION } from "@/components/ui/motion";
 import { cn } from "@/lib/utils";
 import { STAGES, rpcContract, type Board, type Decision, type PlanRound, type PullRequest, type Stage, type Ticket } from "../src/contract";
 import { useOpenAgentThread, useOpenOrchestratorTab } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
+import { LINK_UNDERLINE, TEXT_LINK, TicketLink } from "./TicketLink";
 import {
   STAGE_HINTS,
   archiveLabel,
@@ -157,8 +159,8 @@ function OrchestratorBand({ board }: { board: Board }) {
 }
 
 function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] }) {
-  const openTicket = useOpenTicket();
   const next = board.nextPr;
+  const titles = new Map(board.tickets.map((t) => [t.key, shortTitle(t.title)]));
   const showReviews = board.integrations.codeReview;
   const showNext = board.board.options.rules.onePrAtATime;
   return (
@@ -179,7 +181,7 @@ function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] })
         ) : (
           <div className="space-y-2">
             {board.plansWaiting.map((round) => (
-              <PlanWaitingCard key={round.id} round={round} />
+              <PlanWaitingCard key={round.id} round={round} title={titles.get(round.ticketKey) ?? null} />
             ))}
             {decisions.map((d) => (
               <DecisionCard key={d.id} decision={d} compact />
@@ -196,23 +198,23 @@ function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] })
           {board.reviewsWaiting.length === 0 ? (
             <p className="text-sm text-muted-foreground">No Code Review Workspace round from a ticket agent is open.</p>
           ) : (
-            <ul className="space-y-1 text-sm">
+            <ul className="space-y-2 text-sm">
               {board.reviewsWaiting.map((r) => (
-                <li key={r.targetKey} className="flex flex-wrap gap-x-2">
-                  <button
-                    type="button"
-                    className="font-semibold hover:underline"
-                    onClick={() => openTicket(board.board.id, r.ticketKey)}
-                  >
-                    {r.ticketKey}
-                  </button>
-                  <a
-                    className="hover:underline"
-                    href={`/plugins/code-review-workspace/review/${encodeURIComponent(r.targetKey)}`}
-                  >
-                    Open review
-                  </a>
-                  {r.label && <span className="text-muted-foreground">{r.label}</span>}
+                <li key={r.targetKey}>
+                  <p className="flex items-baseline gap-2">
+                    <TicketLink boardId={board.board.id} ticketKey={r.ticketKey} />
+                    {titles.has(r.ticketKey) && <span className="truncate">{titles.get(r.ticketKey)}</span>}
+                  </p>
+                  <p className="flex flex-wrap items-baseline gap-x-2">
+                    <a
+                      className={TEXT_LINK}
+                      aria-label={`Open review of ${r.ticketKey} in Code Review Workspace`}
+                      href={`/plugins/code-review-workspace/review/${encodeURIComponent(r.targetKey)}`}
+                    >
+                      Open review
+                    </a>
+                    {r.label && <span className="text-muted-foreground">{r.label}</span>}
+                  </p>
                 </li>
               ))}
             </ul>
@@ -225,7 +227,7 @@ function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] })
             <div className="space-y-1 text-sm">
               <p>
                 {next.url ? (
-                  <UrlLink href={next.url} className="font-semibold hover:underline">
+                  <UrlLink href={next.url} className={cn(TEXT_LINK, "font-semibold")}>
                     {next.repo} #{next.number}
                   </UrlLink>
                 ) : (
@@ -233,14 +235,7 @@ function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] })
                     {next.repo} #{next.number}
                   </span>
                 )}{" "}
-                for{" "}
-                <button
-                  type="button"
-                  className="hover:underline"
-                  onClick={() => openTicket(board.board.id, next.ticketKey)}
-                >
-                  {next.ticketKey}
-                </button>
+                for <TicketLink boardId={board.board.id} ticketKey={next.ticketKey} />
               </p>
               <p className="text-muted-foreground">
                 {next.after
@@ -385,37 +380,41 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
       role: ticket.implementerThreadIds.length > 1 ? `Implementer ${i + 1}` : "Implementer",
     })),
   ];
+  const open = () => openTicket(ticket.boardId, ticket.key);
   return (
     <article
+      onClick={fromCard(open)}
       className={cn(
-        "grid gap-2.5 rounded-xl border border-border bg-card px-3.5 py-3",
+        "group/card grid cursor-pointer gap-2.5 rounded-xl border border-border bg-card px-3.5 py-3 hover:bg-muted",
+        CONTROL_HOVER_TRANSITION,
         paused && "border-dashed",
         ticket.openDecisions > 0 && "border-[var(--brand,var(--attention))]",
       )}
     >
-      <div className="grid gap-0.5">
-        <div className="flex items-baseline gap-2">
-          <button
-            type="button"
-            className="text-[15px] font-bold tracking-tight hover:underline"
-            onClick={() => openTicket(ticket.boardId, ticket.key)}
-          >
+      {/* The spaces between spans only space out the button's accessible name; flex and grid drop them. */}
+      <button
+        type="button"
+        className="-m-1 grid cursor-pointer gap-0.5 rounded-md p-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={open}
+      >
+        <span className="flex w-full items-baseline gap-2">
+          <span className={cn("text-[15px] font-bold tracking-tight group-hover/card:decoration-foreground", LINK_UNDERLINE)}>
             {ticket.key}
-          </button>
+          </span>{" "}
           {ticket.milestone && (
             <span className="rounded-full border border-border px-1.5 text-[11px] font-semibold text-muted-foreground">
               {ticket.milestone}
             </span>
-          )}
+          )}{" "}
           {ticket.openDecisions > 0 && (
             <span className="text-xs font-medium text-[var(--brand,var(--attention))]">
               {ticket.openDecisions} decision{ticket.openDecisions > 1 ? "s" : ""}
             </span>
-          )}
+          )}{" "}
           <span className="ml-auto truncate text-xs text-muted-foreground">{ticket.repo}</span>
-        </div>
-        <p className="text-[13.5px]">{shortTitle(ticket.title)}</p>
-      </div>
+        </span>{" "}
+        <span className="text-[13.5px]">{shortTitle(ticket.title)}</span>
+      </button>
       {ticket.prs.length > 0 && <PrStack prs={ticket.prs} />}
       <CardNote ticket={ticket} />
       {ticket.stage === "done" && archiveLabel(ticket) && (
@@ -432,7 +431,7 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
               <Dot presence={p} />
               <button
                 type="button"
-                className="text-foreground hover:underline"
+                className={cn(TEXT_LINK, "text-foreground")}
                 onClick={() => openAgent(agent.id, `${ticket.key} ${agent.role.toLowerCase()}`)}
               >
                 {agent.role}
@@ -509,42 +508,87 @@ function PlanNote({ boardId, ticketKey, round }: { boardId: number; ticketKey: s
           ? `Plan round ${round.n} waits on you${round.marks > 0 ? `, ${round.marks} mark${round.marks > 1 ? "s" : ""} drafted` : ""}.`
           : `Changes requested on plan round ${round.n}; the agent is revising.`}
       </span>
-      <button type="button" className="font-medium hover:underline" onClick={() => go.plan(boardId, ticketKey, round.n)}>
+      <button type="button" className={cn(TEXT_LINK, "font-medium")} onClick={() => go.plan(boardId, ticketKey, round.n)}>
         {open ? "Review plan" : "See round"}
       </button>
     </p>
   );
 }
 
-/** A plan round in Waiting on you: who sent it, when, and the way in. */
-function PlanWaitingCard({ round }: { round: PlanRound }) {
+/**
+ * A plan round in Waiting on you: whose, when, and the way in. A click anywhere on it reviews the plan;
+ * its key opens the ticket.
+ */
+function PlanWaitingCard({ round, title }: { round: PlanRound; title: string | null }) {
   const go = useGo();
+  const review = () => go.plan(round.boardId, round.ticketKey, round.n);
   return (
-    <article className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-[var(--brand,var(--attention))] bg-card px-3 py-2 text-sm">
-      <span className="font-semibold">{round.ticketKey}</span>
-      <span>Plan round {round.n}</span>
-      <span className="text-xs text-muted-foreground">sent {ago(round.submittedAt)}</span>
-      {round.source === "inferred" && <span className="text-xs text-muted-foreground">found in the plans folder</span>}
-      <Button size="sm" className="ml-auto" onClick={() => go.plan(round.boardId, round.ticketKey, round.n)}>
+    <article
+      aria-label={`${round.ticketKey} plan round ${round.n}`}
+      onClick={fromCard(review)}
+      className={cn(
+        // Pointing at the key, which opens the ticket, doesn't light up the card, whose click reviews the plan.
+        "grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 rounded-lg border border-[var(--brand,var(--attention))] bg-card px-3 py-2 text-sm hover:bg-muted has-[[data-slot=ticket-link]:hover]:bg-card",
+        CONTROL_HOVER_TRANSITION,
+      )}
+    >
+      <p className="flex flex-wrap items-baseline gap-x-2">
+        <TicketLink boardId={round.boardId} ticketKey={round.ticketKey} />
+        <span>Plan round {round.n}</span>
+      </p>
+      <Button
+        size="sm"
+        aria-label={`Review plan round ${round.n} of ${round.ticketKey}`}
+        onClick={review}
+      >
         Review plan
       </Button>
+      <p className="col-span-2 flex min-w-0 items-baseline gap-2">
+        {title && (
+          <span className="truncate" title={title}>
+            {title}
+          </span>
+        )}
+        <span className="shrink-0 text-xs text-muted-foreground">{ago(round.submittedAt)}</span>
+      </p>
+      {round.source === "inferred" && <p className="col-span-2 text-xs text-muted-foreground">Found in the plans folder.</p>}
     </article>
   );
 }
 
+/**
+ * A click anywhere on a card runs its main action, for the mouse; a button on the card is the way in for
+ * the keyboard. Inner controls do their own thing, and a drag that selected text is not a click.
+ */
+function fromCard(action: () => void) {
+  return (e: MouseEvent<HTMLElement>) => {
+    if ((e.target as Element).closest("a, button, input, textarea, select, label")) return;
+    if (window.getSelection()?.isCollapsed === false) return;
+    action();
+  };
+}
+
 function CardNote({ ticket }: { ticket: Ticket }) {
   if (ticket.stage === "blocked") return <BlockedNote ticket={ticket} />;
-  if (ticket.openReview?.state === "with-agent") {
-    return <p className="text-[12.5px] text-muted-foreground">Your review comments are with the agent.</p>;
-  }
-  if (ticket.openReview) {
+  const review = ticket.openReview;
+  if (review?.state === "with-agent") {
     return (
-      <a
-        className="text-[12.5px] text-[var(--brand,var(--attention))] hover:underline"
-        href={`/plugins/code-review-workspace/review/${encodeURIComponent(ticket.openReview.targetKey)}`}
-      >
-        A review round is open for you.
-      </a>
+      <p className="text-[12.5px] text-muted-foreground">
+        {review.label ? `With the agent: ${review.label}.` : "Your review comments are with the agent."}
+      </p>
+    );
+  }
+  if (review) {
+    return (
+      <p className="text-[12.5px]">
+        <a
+          className={cn(TEXT_LINK, "text-[var(--brand,var(--attention))]")}
+          href={`/plugins/code-review-workspace/review/${encodeURIComponent(review.targetKey)}`}
+        >
+          A review round is open for you.
+        </a>
+        {review.label && <span className="text-muted-foreground"> {review.label}</span>}
+      </p>
     );
   }
   const round = ticket.planRound;

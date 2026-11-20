@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import {
   Markdown,
   UrlLink,
@@ -11,9 +11,10 @@ import { defineRpcContract } from "../src/rpc";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { rpcContract, type Ticket, type TicketDetail } from "../src/contract";
+import { rpcContract, type Review, type Ticket, type TicketDetail } from "../src/contract";
 import { useOpenAgentThread, useOrchestratorTabOnFirstVisit } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
+import { TEXT_LINK } from "./TicketLink";
 import { BlockedNote, Overview } from "./Overview";
 import { BoardSettings } from "./BoardSettings";
 import { DoneList } from "./DoneList";
@@ -30,7 +31,7 @@ import {
   useGo,
   useOpenDecisions,
   useOpenTicket,
-  useReviewPolling,
+  useReviewRefresh,
   useTicketDetail,
 } from "./hooks";
 import { PlanReview } from "./PlanReview";
@@ -63,7 +64,7 @@ export function BoardPage({ subPath }: PluginNavPanelProps) {
   const route = parseRoute(subPath);
   const boards = useBoards();
   const list = boards.data?.boards;
-  useReviewPolling(boards.data?.integrations.codeReview ?? false);
+  useReviewRefresh();
   const boardId = routeBoardId(route, list);
 
   let body: ReactNode;
@@ -185,13 +186,19 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
               Round {ticket.planRound.n}: {ticket.planRound.status.replace("_", " ")}
               {ticket.planRound.marks > 0 ? `, ${ticket.planRound.marks} marks` : ""}
             </span>
-            <button
-              type="button"
-              className="font-medium hover:underline"
-              onClick={() => go.plan(boardId, ticket.key, ticket.planRound!.n)}
-            >
-              {ticket.planRound.status === "open" ? "Review plan" : "Open plan"}
-            </button>
+            {ticket.planRound.status === "open" ? (
+              <Button size="sm" onClick={() => go.plan(boardId, ticket.key, ticket.planRound!.n)}>
+                Review plan
+              </Button>
+            ) : (
+              <button
+                type="button"
+                className={cn(TEXT_LINK, "font-medium")}
+                onClick={() => go.plan(boardId, ticket.key, ticket.planRound!.n)}
+              >
+                Open plan
+              </button>
+            )}
           </p>
         </Section>
       )}
@@ -222,9 +229,13 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
       </Section>
 
       {integrations?.codeReview && (
-        <Section title="Reviews" count={reviews.length}>
+        <Section
+          title="Reviews"
+          count={reviews.length}
+          trailing={<ReviewChanges boardId={boardId} ticket={ticket} reviews={reviews} />}
+        >
           {reviews.length === 0 ? (
-            <Empty>No Code Review Workspace reviews from this ticket's threads.</Empty>
+            <Empty>No Code Review Workspace reviews for this ticket.</Empty>
           ) : (
             <ul className="divide-y divide-border rounded-lg border border-border text-sm">
               {reviews.map((r) => (
@@ -233,9 +244,9 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
                     className="font-mono text-xs hover:underline"
                     href={`/plugins/code-review-workspace/review/${encodeURIComponent(r.targetKey)}`}
                   >
-                    {r.gitRef ?? r.targetKey}
+                    {r.id}
                   </a>
-                  <span className="text-muted-foreground">{REVIEW_STATE_LABELS[r.state]}</span>
+                  <span className="text-muted-foreground">{r.label ?? REVIEW_STATE_LABELS[r.state]}</span>
                   {r.createdAt && (
                     <span className="ml-auto text-xs text-muted-foreground">{formatTime(r.createdAt)}</span>
                   )}
@@ -300,6 +311,48 @@ function ArchiveLine({ boardId, ticket }: { boardId: number; ticket: Ticket }) {
       )}
       {unarchive.error && <span className="text-destructive">{errorText(unarchive.error)}</span>}
     </p>
+  );
+}
+
+/**
+ * Opens the ticket's live review in Code Review Workspace; with none, starts
+ * its folder's review from the lead thread, then goes to it.
+ */
+function ReviewChanges({ boardId, ticket, reviews }: { boardId: number; ticket: Ticket; reviews: Review[] }) {
+  const start = useRpcMutation({ contract: rpcContract, method: "reviews.start" });
+  // bb routes a click on a link inside the plugin in place; the SDK only navigates to this plugin's own panels.
+  const link = useRef<HTMLAnchorElement>(null);
+  const live = ticket.openReview ?? reviews.find((r) => r.state !== "approved" && r.state !== "archived") ?? null;
+  const go = async () => {
+    const { targetKey } = await start.mutate({ boardId, key: ticket.key });
+    const anchor = link.current;
+    if (!anchor) return;
+    anchor.href = `/plugins/code-review-workspace/review/${encodeURIComponent(targetKey)}`;
+    anchor.click();
+  };
+  // The hidden link stays mounted whichever button shows: the refetch after starting can switch to Open review first.
+  return (
+    <span className="flex items-center gap-2">
+      {live ? (
+        <Button asChild size="sm" variant="outline">
+          <a href={`/plugins/code-review-workspace/review/${encodeURIComponent(live.targetKey)}`}>Open review</a>
+        </Button>
+      ) : (
+        ticket.environmentId && (
+          <>
+            {start.error && (
+              <span role="alert" className="text-xs font-normal text-destructive">
+                {errorText(start.error)}
+              </span>
+            )}
+            <Button size="sm" variant="outline" disabled={start.isPending} onClick={() => void go().catch(() => {})}>
+              {start.isPending ? "Starting review…" : "Review changes"}
+            </Button>
+          </>
+        )
+      )}
+      <a ref={link} hidden aria-hidden="true" />
+    </span>
   );
 }
 
@@ -387,6 +440,7 @@ function LinearSection({ boardId, linear }: { boardId: number; linear: NonNullab
 const REVIEW_STATE_LABELS = {
   "needs-review": "needs your review",
   "with-agent": "your comments are with the agent",
+  idle: "not waiting on you",
   approved: "approved",
   archived: "archived",
 } as const;

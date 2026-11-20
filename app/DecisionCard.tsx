@@ -8,7 +8,8 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { rpcContract, type Decision } from "../src/contract";
 import { useOpenAgentThread } from "./AgentTabs";
-import { errorText, formatTime, useOpenTicket } from "./hooks";
+import { errorText, formatTime } from "./hooks";
+import { TEXT_LINK, TicketLink } from "./TicketLink";
 
 const OTHER = "__other__";
 
@@ -29,7 +30,6 @@ export function DecisionCard({
   compact?: boolean;
 }) {
   const openAgent = useOpenAgentThread();
-  const openTicket = useOpenTicket();
   return (
     <article
       aria-label={`${decision.ref}: ${decision.question}`}
@@ -38,19 +38,25 @@ export function DecisionCard({
         decision.status === "open" && decision.blocking ? "border-amber-500/60" : "border-border",
       )}
     >
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-        <span className="font-mono">{decision.ref}</span>
-        {showTicket && (
-          <button type="button" className="font-mono text-foreground hover:underline" onClick={() => openTicket(decision.boardId, decision.ticketKey)}>
-            {decision.ticketKey}
-          </button>
-        )}
-        {decision.status === "open" && decision.blocking && (
-          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-700 dark:text-amber-300">blocking</span>
-        )}
-        {decision.status !== "open" && <span className="rounded bg-muted px-1.5 py-0.5">{decision.status}</span>}
-        <span>{formatTime(decision.createdAt)}</span>
-        <button type="button" className="ml-auto hover:underline" onClick={() => openAgent(decision.threadId, `${decision.ticketKey} ${decision.ref}`)}>
+      {/* Open thread keeps the top right; the rest wraps beside it in a narrow column. */}
+      <header className="flex items-start gap-x-3 text-xs text-muted-foreground">
+        <div className="flex min-h-6 min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="font-mono">{decision.ref}</span>
+          {showTicket && (
+            <TicketLink boardId={decision.boardId} ticketKey={decision.ticketKey} className="text-foreground" />
+          )}
+          {decision.status === "open" && decision.blocking && (
+            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-700 dark:text-amber-300">blocking</span>
+          )}
+          {decision.status !== "open" && <span className="rounded bg-muted px-1.5 py-0.5">{decision.status}</span>}
+          <span>{formatTime(decision.createdAt)}</span>
+        </div>
+        <button
+          type="button"
+          aria-label={`Open thread that asked ${decision.ref}`}
+          className={cn(TEXT_LINK, "text-foreground")}
+          onClick={() => openAgent(decision.threadId, `${decision.ticketKey} ${decision.ref}`)}
+        >
           Open thread
         </button>
       </header>

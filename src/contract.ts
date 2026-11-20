@@ -139,7 +139,12 @@ export const ticketSchema = z.object({
   planRound: planRoundSchema.nullable(),
   reportedAt: z.number().nullable(),
   openReview: z
-    .object({ targetKey: z.string(), gitRef: z.string().nullable(), state: z.enum(["needs-review", "with-agent"]) })
+    .object({
+      targetKey: z.string(),
+      id: z.string(),
+      label: z.string().nullable(),
+      state: z.enum(["needs-review", "with-agent"]),
+    })
     .nullable(),
   openDecisions: z.number().int(),
   blockingDecisions: z.number().int(),
@@ -189,21 +194,26 @@ export const stageEventSchema = z.object({
 export type StageEvent = z.infer<typeof stageEventSchema>;
 
 /**
- * needs-review waits on the user; with-agent means they sent comments and the agent
- * is fixing them; approved and archived rounds are finished.
+ * needs-review waits on the user; with-agent waits on the agent, fixing the
+ * comments they sent or pushing, or on a PR not under their login, its author;
+ * idle waits on nobody (a draft, a snooze, a folder on another branch or
+ * removed); approved and archived rounds are finished.
  */
-export const reviewStateSchema = z.enum(["needs-review", "with-agent", "approved", "archived"]);
+export const reviewStateSchema = z.enum(["needs-review", "with-agent", "idle", "approved", "archived"]);
 export type ReviewState = z.infer<typeof reviewStateSchema>;
 
 export const reviewSchema = z.object({
   targetKey: z.string(),
-  gitRef: z.string().nullable(),
+  /** Its short id, as Code Review Workspace shows it: api#4512, or api:feat/x for local work. */
+  id: z.string(),
+  /** Code Review Workspace's own status, such as "Ready to re-review" or "2 of 6 reported". */
   label: z.string().nullable(),
   state: reviewStateSchema,
-  threadId: z.string(),
+  /** Its main thread, which its comments go to; null when it has none. */
+  threadId: z.string().nullable(),
   createdAt: z.number().nullable(),
-  /** When the user last sent comments or an approval from this round. */
-  sentAt: z.number().nullable(),
+  /** When it came to stand as it does: for a review with the agent, when it went to the agent. */
+  since: z.number(),
 });
 export type Review = z.infer<typeof reviewSchema>;
 
@@ -349,6 +359,11 @@ export const rpcContract = defineRpcContract({
   "decisions.retryDelivery": { input: decisionIdInput, output: decisionSchema },
   /** Re-reads review rounds; the page calls it every few seconds while visible. */
   "reviews.poll": { input: z.null(), output: z.object({ changed: z.boolean() }) },
+  /** Starts or opens the ticket's folder review in Code Review Workspace, from its lead thread. */
+  "reviews.start": {
+    input: z.object({ boardId: z.number().int().positive(), key: z.string().min(1).max(40) }).strict(),
+    output: z.object({ targetKey: z.string() }),
+  },
   /** Open plan rounds on every board, for the inbox and the badge. */
   "plans.waiting": { input: z.null(), output: z.object({ rounds: z.array(planRoundSchema) }) },
   "plans.list": {
